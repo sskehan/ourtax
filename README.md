@@ -1,4 +1,4 @@
-# Our Tax — work trips and tax deductions (version 1.0)
+# Our Tax — work trips and tax deductions (version 1.01)
 
 Work kilometres (cents per km), work expenses with receipt photos, a summary for each tax year and an end-of-year PDF for the accountant — for Shaun and Lyndsey on their own phones.
 Runs on your phone, works offline, and keeps a shared live copy in your own Dropbox (synced on Wi‑Fi).
@@ -16,7 +16,7 @@ Only program files go here. The repository is public, so **never upload a backup
 3. **Settings → Pages** → Source **Deploy from a branch** → Branch **main** / **(root)** → **Save**.
    After a minute or two the app address above works.
 
-## 2. The Dropbox app (one time)
+## 2. The Dropbox app (one time — done: OurTax, App key uqt88mydb2aa1fx)
 1. Go to **dropbox.com/developers/apps** → **Create app**.
 2. Choose **Scoped access** → **App folder** → name it **OurTax** (if that name is taken, try **OurTax Skehan**) → **Create app**.
 3. **Permissions** tab: tick `files.metadata.read`, `files.content.read`, `files.content.write` → **Submit**.
@@ -24,7 +24,7 @@ Only program files go here. The repository is public, so **never upload a backup
    Leave **Allow public clients (Implicit Grant & PKCE)** set to **Allow**.
 5. Copy the **App key** (not the App secret — that is never used).
 
-Until the App key is built into the app (send it to Claude for version 1.01), paste it into the **Dropbox App key** box on the Backup & sync screen.
+The App key is built into the app, so there's nothing to paste.
 
 ## 3. Install on each phone
 1. Open the app address in **Chrome**.
@@ -69,4 +69,5 @@ Places, cars, purposes, categories and people can all be added, renamed or hidde
 Your data is not affected. When a file changes, `APP_VERSION` at the top of `app.js` and `VERSION` in `sw.js` change together.
 
 ## Version history
+- **1.01** — Dropbox App key built in (no pasting needed).
 - **1.0** — Trips with saved places and date ranges, expenses with receipt photos and work %, records with change history and 7-year keeping, tax year summary, end-of-year PDF, per-year tax rules (rate, cap, standard deduction), two phones through Dropbox (Wi‑Fi only), 2025-26 sample data, starter trips 31 Jul 2026 (Windsor, covering) and 19 Oct 2026 (Mt Druitt).

@@ -1,6 +1,6 @@
 "use strict";
 /* Our Tax — work trips and tax deductions for two people. Data lives on each phone (IndexedDB), with a shared live copy in Dropbox. */
-const APP_ID = "our-tax", BACKUP_VERSION = 1, APP_VERSION = "1.0";
+const APP_ID = "our-tax", BACKUP_VERSION = 1, APP_VERSION = "1.01";
 
 /* ================= storage ================= */
 const STORES = ["entries", "files", "meta"];
@@ -583,7 +583,7 @@ function sheetBackup() {
      live/files/<id>.<ext>      receipt photos, each sent once
      snapshots/ourtax-*.json    one per day, plus one before every restore (kept 60 days)
      archive/ourtax-YYYY-MM.json   the last copy of each month (kept for the record-keeping period + 1 year)   */
-const DBX_APP_KEY = ""; // public App key for the Our Tax Dropbox app — leave blank until created; it can be pasted in the app meanwhile
+const DBX_APP_KEY = "uqt88mydb2aa1fx"; // public App key for the Our Tax Dropbox app (the App secret is never used)
 const DBX_TOKEN = "https://api.dropboxapi.com/oauth2/token";
 const DBX_REDIRECT = location.origin + location.pathname.replace(/index\.html$/, "");
 const LIVE = "/live/ourtax.json";
