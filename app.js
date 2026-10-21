@@ -1,6 +1,6 @@
 "use strict";
 /* Our Tax — work trips and tax deductions for two people. Data lives on each phone (IndexedDB), with a shared live copy in Dropbox. */
-const APP_ID = "our-tax", BACKUP_VERSION = 1, APP_VERSION = "1.02";
+const APP_ID = "our-tax", BACKUP_VERSION = 1, APP_VERSION = "1.03";
 
 /* ================= storage ================= */
 const STORES = ["entries", "files", "meta"];
@@ -521,13 +521,13 @@ async function makePdf() {
   const trips = [...c.trips].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : (a.created || 0) - (b.created || 0));
   const exps = [...c.exps].sort((a, b) => a.date < b.date ? -1 : 1);
   const files = []; for (const e of exps) for (const id of e.files || []) { const fl = await dbGet("files", id); if (fl) files.push({ e, fl, url: await fileURL(id) }); }
-  let h = `<style>#report{font:10pt/1.4 "IBM Plex Sans",Arial,sans-serif;color:#111}#report h1{font-size:20pt;margin:2pt 0}#report h2{font-size:12pt;margin:16pt 0 6pt}#report .k{font-size:8pt;letter-spacing:.08em;text-transform:uppercase;color:#555;font-weight:600}
-    #report .hd{display:flex;justify-content:space-between;border-bottom:1.5pt solid #111;padding-bottom:8pt}#report .meta{text-align:right;font-size:9pt;color:#444}
+  let h = `<style>#report{font:10pt/1.4 "IBM Plex Sans",Arial,sans-serif;color:#111}#report h1{font-size:20pt;margin:2pt 0;color:#13294B}#report h2{font-size:12pt;margin:16pt 0 6pt;color:#13294B}#report .k{font-size:8pt;letter-spacing:.08em;text-transform:uppercase;color:#555;font-weight:600}
+    #report .hd{display:flex;justify-content:space-between;border-bottom:1.5pt solid #13294B;padding-bottom:8pt}#report .meta{text-align:right;font-size:9pt;color:#444}
     #report .rt{width:100%;border-collapse:collapse;font-size:9pt}#report .rt th,#report .rt td{border-bottom:.5pt solid #bbb;padding:3pt 5pt;text-align:left;vertical-align:top}#report .rt thead th{border-bottom:1pt solid #333;font-size:8pt;color:#333}#report .rt tfoot td{font-weight:700;border-top:1pt solid #333;border-bottom:0}#report .n{text-align:right;white-space:nowrap}
     #report .facts{display:flex;gap:6pt;flex-wrap:wrap;margin-bottom:6pt}#report .facts div{border:.5pt solid #bbb;border-radius:4pt;padding:4pt 8pt;font-size:8pt;color:#444}#report .facts b{display:block;font-size:10.5pt;color:#111}
     #report p{margin:4pt 0}#report .sm{font-size:8.5pt;color:#444}#report .ph{display:grid;grid-template-columns:1fr 1fr;gap:10pt}#report .ph figure{margin:0;break-inside:avoid}#report .ph img{width:100%;max-height:115mm;object-fit:contain;border:.5pt solid #ccc}#report figcaption{font-size:8.5pt;color:#333;margin-top:2pt}
     #report .ft{margin-top:14pt;border-top:.5pt solid #bbb;padding-top:5pt;font-size:8pt;color:#555}#report tr,#report .facts{break-inside:avoid}</style>
-  <div class="hd"><div><div class="k">Work-related deductions · ${f.fy}</div><h1>${esc(name)}</h1><div>Prepared for ${esc(st.accountant || "the tax agent")}</div></div>
+  <div class="hd"><div style="display:flex;gap:12pt;align-items:flex-start"><svg width="42" height="42" viewBox="0 0 96 96"><rect width="96" height="96" rx="22" fill="#13294B"/><path d="M24 50 L41 66 L72 31" stroke="#FFFFFF" stroke-width="15" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M24 50 L41 66 L72 31" stroke="#13294B" stroke-width="2.6" fill="none" stroke-dasharray="5 6" stroke-linecap="round"/><circle cx="72" cy="31" r="5.5" fill="#F2B544"/></svg><div><div class="k">Work-related deductions · ${f.fy}</div><h1>${esc(name)}</h1><div>Prepared for ${esc(st.accountant || "the tax agent")}</div></div></div>
     <div class="meta">Period ${fyRange(f.fy)}<br>Generated ${fmtDate(todayISO())}<br>Our Tax v${APP_VERSION}</div></div>
   <h2>1. Summary</h2>${T([["Category"], ["Amount", "n"]], sumRows, `<tr><td>Total deductions</td><td class="n">${money(c.total)}</td></tr>`)}`;
   if (c.std) h += `<p class="sm" style="margin-top:6pt">Standard deduction ${f.fy}: ${money(c.std.amt)}. Work-related items above that count toward it total ${money(c.std.work)}; ${money(c.std.onTop)} is claimed on top either way. ${c.std.itemise ? "Itemised work-related expenses exceed the standard deduction." : "The standard deduction is larger than the itemised work-related expenses."}</p>`;

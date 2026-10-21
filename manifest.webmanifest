@@ -6,8 +6,8 @@
   "start_url": "./?app=our-tax",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#f3f5f7",
-  "theme_color": "#0b6e99",
+  "background_color": "#13294b",
+  "theme_color": "#13294b",
   "icons": [
     {
       "src": "icon-192.png",

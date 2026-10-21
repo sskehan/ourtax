@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Our Tax</title>
-<meta name="theme-color" content="#0b6e99">
+<meta name="theme-color" content="#13294b">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-192.png">
@@ -12,17 +12,19 @@
 <style>
 /* Our Tax — one-column phone app: header with sync status, scrolling content, bottom tab bar; forms open as full-screen sheets */
 :root{
-  --bg:#f3f5f7; --surface:#ffffff; --surface-2:#eaeef1; --seg:#e2e7eb; --line:#dde3e8; --line-2:#c9d2d9;
-  --ink:#14212b; --ink-2:#4a5763; --ink-3:#5a6772;
-  --accent:#0b6e99; --accent-ink:#ffffff; --accent-soft:#e6f0f5; --accent-strong:#08506f;
-  --lyn:#9a4708; --lyn-soft:#fbebdd; --ok:#1e6b3f; --ok-soft:#e3f1e8; --warn:#9a5a00; --warn-soft:#fbf0dc; --bad:#b3362c; --bad-soft:#f6dcd9; --bar:#8a97a1;
+  --bg:#f5f7fa; --surface:#ffffff; --surface-2:#edf0f4; --seg:#e3e8ee; --line:#dfe4ea; --line-2:#c9d2dc;
+  --ink:#14212b; --ink-2:#3e4b5a; --ink-3:#5b6878; --head:#13294b;
+  --navy:#13294b; --navy-ink:#ffffff; --navy-2:#9fb3cf; --gold:#f2b544;
+  --accent:#0b7285; --accent-ink:#ffffff; --accent-soft:#e3f2f5; --accent-strong:#085a69;
+  --lyn:#7a3e8c; --lyn-soft:#f3e8f6; --ok:#1e7b4f; --ok-soft:#e4f3ea; --warn:#a35d00; --warn-soft:#fdf1dc; --bad:#b42318; --bad-soft:#fde7e5; --bar:#8a97a5;
   --f:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; --r:14px; color-scheme:light;
 }
 @media (prefers-color-scheme: dark){:root{
-  --bg:#0f1418; --surface:#182026; --surface-2:#1f2930; --seg:#243039; --line:#2a353d; --line-2:#3a4852;
-  --ink:#e6ecf0; --ink-2:#b4c0c9; --ink-3:#9aa7b1;
-  --accent:#4fb3e0; --accent-ink:#04202d; --accent-soft:#16303d; --accent-strong:#7ccaee;
-  --lyn:#f0a868; --lyn-soft:#3a2716; --ok:#6fcf97; --ok-soft:#15302125; --warn:#f0b45a; --warn-soft:#3a2c14; --bad:#ef8a80; --bad-soft:#3d1f1c; --bar:#5d6b75; color-scheme:dark}}
+  --bg:#0e141b; --surface:#17202a; --surface-2:#1e2833; --seg:#25303c; --line:#2a3541; --line-2:#3a4755;
+  --ink:#e6ecf2; --ink-2:#b8c3cf; --ink-3:#98a5b3; --head:#e6ecf2;
+  --navy:#0b1a30; --navy-ink:#ffffff; --navy-2:#9fb3cf; --gold:#f2b544;
+  --accent:#4cc3d9; --accent-ink:#04232a; --accent-soft:#123540; --accent-strong:#86d9e8;
+  --lyn:#d9a3e8; --lyn-soft:#3a2442; --ok:#6fcf9a; --ok-soft:#163324; --warn:#f0b45a; --warn-soft:#3a2c14; --bad:#f08a80; --bad-soft:#3d1f1c; --bar:#5d6b78; color-scheme:dark}}
 *{box-sizing:border-box}
 html,body{margin:0}
 body{background:var(--bg);color:var(--ink);font:15px/1.45 var(--f);-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
@@ -34,13 +36,14 @@ button,input,select,textarea{font:inherit;color:inherit}
 h1,h2,h3{margin:0;line-height:1.2} h2{font-size:18px;font-weight:600} h3{font-size:14px;font-weight:600;color:var(--ink-2)}
 
 /* header */
-.top{position:sticky;top:0;z-index:20;background:var(--bg);padding-top:env(safe-area-inset-top,0px)}
-.top .wrap{display:flex;align-items:center;gap:10px;padding-block:14px 8px}
-.brand{flex:none;display:flex;align-items:baseline;gap:8px;white-space:nowrap}
+.top{position:sticky;top:0;z-index:20;background:var(--navy);color:var(--navy-ink);padding-top:env(safe-area-inset-top,0px)}
+.top .wrap{display:flex;align-items:center;gap:10px;padding-block:12px}
+.brand{flex:none;display:flex;align-items:center;gap:10px;white-space:nowrap}
+.brand svg{width:32px;height:32px;flex:none}
 .brand b{font-size:24px;font-weight:700;letter-spacing:-.02em}
-.brand span{font-size:12px;color:var(--ink-3)}
-.sync{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;padding:6px 10px;border-radius:999px;background:var(--surface-2);color:var(--ink-2);border:0;cursor:pointer;max-width:none;flex:0 1 auto;min-width:0;margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sync.ok{background:var(--ok-soft);color:var(--ok)} .sync.warn{background:var(--warn-soft);color:var(--warn)}
+.brand span{font-size:12px;color:var(--navy-2);align-self:flex-end;padding-bottom:3px}
+.sync{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.12);color:#ffffff;border:0;cursor:pointer;max-width:none;flex:0 1 auto;min-width:0;margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sync.ok{color:#a8e6c4} .sync.warn{background:rgba(242,181,68,.18);color:#f7cf7e}
 .sync svg{width:14px;height:14px;flex:none}
 
 main{padding-bottom:calc(88px + env(safe-area-inset-bottom,0px))}
@@ -103,9 +106,11 @@ nav.tabs button[aria-current="page"]{color:var(--accent);font-weight:600}
 .list>.li:last-child{border-bottom:0}
 .li .t{flex:1;min-width:0} .li .t b{display:block;font-size:15px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis} .li .t span{display:block;font-size:12.5px;color:var(--ink-3)}
 .li .amt{font-size:15px;font-weight:600;white-space:nowrap}
+.li .t span.tag{display:inline-block;font-size:11px;color:var(--ink-2)} .li .t span.tag.bad{color:var(--bad)}
 .li.removed .t b,.li.removed .amt{text-decoration:line-through;color:var(--ink-3)}
 .av{width:30px;height:30px;border-radius:999px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex:none;background:var(--accent-soft);color:var(--accent)}
 .av.p1{background:var(--lyn-soft);color:var(--lyn)}
+.view h1{color:var(--head)} .kpi{color:var(--head)} .card h2{color:var(--head)}
 .ico{width:36px;height:36px;border-radius:10px;background:var(--accent-soft);color:var(--accent);display:flex;align-items:center;justify-content:center;flex:none}
 .ico svg{width:20px;height:20px}
 .month{display:flex;justify-content:space-between;font-size:13px;font-weight:600;color:var(--ink-2);padding:6px 2px 0}
@@ -150,7 +155,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0;font-siz
 </head>
 <body>
 <header class="top"><div class="wrap">
-  <div class="brand"><b>Our Tax</b><span id="ver"></span></div>
+  <div class="brand"><svg viewBox="0 0 96 96" aria-hidden="true"><rect width="96" height="96" rx="22" fill="#ffffff" fill-opacity=".1"/><path d="M24 50 L41 66 L72 31" stroke="#ffffff" stroke-width="15" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M24 50 L41 66 L72 31" stroke="#13294b" stroke-width="2.6" fill="none" stroke-dasharray="5 6" stroke-linecap="round"/><circle cx="72" cy="31" r="6" fill="#f2b544"/></svg><b>Our Tax</b><span id="ver"></span></div>
   <button type="button" class="sync" id="sync" data-act="goBackup">Loading…</button>
 </div></header>
 <main id="main" class="wrap"></main>
