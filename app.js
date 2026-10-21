@@ -1,6 +1,6 @@
 "use strict";
 /* Our Tax — work trips and tax deductions for two people. Data lives on each phone (IndexedDB), with a shared live copy in Dropbox. */
-const APP_ID = "our-tax", BACKUP_VERSION = 1, APP_VERSION = "1.01";
+const APP_ID = "our-tax", BACKUP_VERSION = 1, APP_VERSION = "1.02";
 
 /* ================= storage ================= */
 const STORES = ["entries", "files", "meta"];

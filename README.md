@@ -1,4 +1,4 @@
-# Our Tax — work trips and tax deductions (version 1.01)
+# Our Tax — work trips and tax deductions (version 1.02)
 
 Work kilometres (cents per km), work expenses with receipt photos, a summary for each tax year and an end-of-year PDF for the accountant — for Shaun and Lyndsey on their own phones.
 Runs on your phone, works offline, and keeps a shared live copy in your own Dropbox (synced on Wi‑Fi).
@@ -69,5 +69,6 @@ Places, cars, purposes, categories and people can all be added, renamed or hidde
 Your data is not affected. When a file changes, `APP_VERSION` at the top of `app.js` and `VERSION` in `sw.js` change together.
 
 ## Version history
+- **1.02** — New app identity so Chrome can install it cleanly (fixes "This app is already installed" / "Could not open app"); the Our Tax title no longer wraps beside a long sync status.
 - **1.01** — Dropbox App key built in (no pasting needed).
 - **1.0** — Trips with saved places and date ranges, expenses with receipt photos and work %, records with change history and 7-year keeping, tax year summary, end-of-year PDF, per-year tax rules (rate, cap, standard deduction), two phones through Dropbox (Wi‑Fi only), 2025-26 sample data, starter trips 31 Jul 2026 (Windsor, covering) and 19 Oct 2026 (Mt Druitt).
