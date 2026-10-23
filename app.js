@@ -1,6 +1,6 @@
 "use strict";
 /* Our Tax — work trips and tax deductions for two people. Data lives on each phone (IndexedDB), with a shared live copy in Dropbox. */
-const APP_ID = "our-tax", BACKUP_VERSION = 1, APP_VERSION = "1.03";
+const APP_ID = "our-tax", BACKUP_VERSION = 1, APP_VERSION = "1.04";
 
 /* ================= storage ================= */
 const STORES = ["entries", "files", "meta"];
@@ -31,6 +31,10 @@ const DEFAULT_SETTINGS = {
     "2025-26": { ...DEFAULT_RULE, rate: 0.88, std: false },
     "2026-27": { ...DEFAULT_RULE, rate: 0.91, std: true }
   },
+  shifts: [{ id: "sh-shaun-day", person: "p-shaun", name: "Day", start: "08:00", end: "16:30", brk: 30 },
+    { id: "sh-lyn-day", person: "p-lyndsey", name: "Day", start: "07:00", end: "19:00", brk: 0 },
+    { id: "sh-lyn-night", person: "p-lyndsey", name: "Night", start: "19:00", end: "07:00", brk: 0 }],
+  billKinds: [{ id: "bk-power", name: "Electricity / gas" }, { id: "bk-net", name: "Internet" }, { id: "bk-phone", name: "Phone" }, { id: "bk-stat", name: "Stationery / printer ink" }],
   accountant: "Positive Tax Solutions", retainYears: 7
 };
 const SET = () => Object.assign({}, DEFAULT_SETTINGS, S.meta.settings || {});
@@ -62,14 +66,26 @@ const fyStart = fy => `${fyY(fy)}-07-01`, fyEnd = fy => `${fyY(fy) + 1}-06-30`;
 const fyRange = fy => `1 Jul ${fyY(fy)} – 30 Jun ${fyY(fy) + 1}`;
 const nextFy = fy => `${fyY(fy) + 1}-${p2((fyY(fy) + 2) % 100)}`;
 const keepUntil = fy => `${fyY(fy) + 1 + (SET().retainYears || 7)}-06-30`;
-const inRetention = e => todayISO() <= keepUntil(fyOf(e.date));
-function fyList() { const set = new Set([fyOf(todayISO()), ...Object.keys(SET().rules || {}), ...S.entries.map(e => fyOf(e.date))]); return [...set].filter(f => /^\d{4}-\d{2}$/.test(f)).sort().reverse(); }
+const entryFy = e => e.fy || fyOf(e.date); // bills carry their own tax year
+const inRetention = e => todayISO() <= keepUntil(entryFy(e));
+function fyList() { const set = new Set([fyOf(todayISO()), ...Object.keys(SET().rules || {}), ...S.entries.filter(e => e.date).map(entryFy)]); return [...set].filter(f => /^\d{4}-\d{2}$/.test(f)).sort().reverse(); }
 /* the rules for a tax year; a year with none set borrows the latest earlier year's (and says so) */
 function rulesFor(fy) {
   const R = SET().rules || {};
-  if (R[fy]) return { ...DEFAULT_RULE, ...R[fy], fy, inherited: false };
+  if (R[fy]) return wfhRule({ ...DEFAULT_RULE, ...R[fy], fy, inherited: false });
   const ks = Object.keys(R).sort(), before = ks.filter(k => k < fy), from = before.length ? before[before.length - 1] : ks[0];
-  return { ...DEFAULT_RULE, ...(from ? R[from] : {}), fy, inherited: true, from: from || null };
+  const r = wfhRule({ ...DEFAULT_RULE, ...(from ? R[from] : {}), fy, inherited: true, from: from || null });
+  if (!(fy in WFH_KNOWN)) r.wfhOk = false; // a borrowed rate is never treated as confirmed
+  return r;
+}
+/* work-from-home fixed rate: the ATO's published rates; a later year starts at the last known rate, marked provisional until confirmed */
+const WFH_KNOWN = { "2020-21": 0.52, "2021-22": 0.52, "2022-23": 0.67, "2023-24": 0.67, "2024-25": 0.70, "2025-26": 0.70 };
+function wfhRule(r) {
+  if (r.wfh === undefined) r.wfh = true;
+  if (r.wfhRate === undefined) r.wfhRate = WFH_KNOWN[r.fy] ?? 0.70;
+  if (r.wfhOk === undefined) r.wfhOk = r.fy in WFH_KNOWN;
+  if (r.wfhInStd === undefined) r.wfhInStd = true;
+  return r;
 }
 const people = () => SET().people || [];
 const pName = id => (people().find(p => p.id === id) || {}).name || "—";
@@ -83,13 +99,37 @@ const catName = id => ((SET().categories || []).find(c => c.id === id) || {}).na
 const expClaim = e => r2((e.amount || 0) * (e.pct == null ? 100 : e.pct) / 100);
 const tripClaim = e => { const R = rulesFor(fyOf(e.date)); return R.cpk ? r2((e.km || 0) * R.rate) : 0; };
 const live = e => !e.removed;
+const shiftsFor = pid => (SET().shifts || []).filter(s => s.person === pid && !s.hidden);
+const t12 = hm => { if (!/^\d{1,2}:\d{2}$/.test(hm || "")) return "—"; let [h, m] = hm.split(":").map(Number); const ap = h >= 12 ? "pm" : "am"; h = h % 12 || 12; return `${h}:${p2(m)}${ap}`; };
+/* hours worked from start to finish, less the unpaid break; a finish at or before the start runs past midnight */
+function shiftHours(start, end, brk) {
+  const ok = x => /^\d{1,2}:\d{2}$/.test(x || ""); if (!ok(start) || !ok(end)) return null;
+  const [a, b] = start.split(":").map(Number), [c, d] = end.split(":").map(Number);
+  let m = (c * 60 + d) - (a * 60 + b); if (m <= 0) m += 1440; m -= Math.max(0, num(brk) || 0);
+  return m > 0 ? Math.round(m / 60 * 100) / 100 : 0;
+}
+const overnight = (start, end) => !!start && !!end && end <= start;
+const hrsf = h => (h == null || isNaN(h)) ? "—" : (+h).toLocaleString("en-AU", { maximumFractionDigits: 2 }) + " h";
+const brkf = b => (num(b) || 0) ? `${num(b)} min break` : "no break";
+const wfhClaim = e => { const R = rulesFor(fyOf(e.date)); return R.wfh ? r2((e.hours || 0) * R.wfhRate) : 0; };
+const entryAmt = e => e.type === "trip" ? tripClaim(e) : e.type === "wfh" ? wfhClaim(e) : e.type === "expense" ? expClaim(e) : 0;
+/* bills held as evidence for the running costs the fixed rate covers */
+function billsFor(fy, pid) {
+  const kinds = SET().billKinds || [], bills = S.entries.filter(e => e.type === "bill" && live(e) && entryFy(e) === fy && (e.covers || []).includes(pid));
+  return kinds.filter(k => !k.hidden || bills.some(b => b.kind === k.id)).map(k => ({ k, held: bills.filter(b => b.kind === k.id) }));
+}
 
 /* ================= calculations ================= */
 /* totals for one tax year, for one person (or everyone when pid is null) */
 function calc(fy, pid) {
   const R = rulesFor(fy), set = SET();
   const list = S.entries.filter(e => live(e) && e.date && fyOf(e.date) === fy && (!pid || e.person === pid));
-  const trips = list.filter(e => e.type === "trip"), exps = list.filter(e => e.type === "expense");
+  const trips = list.filter(e => e.type === "trip"), exps = list.filter(e => e.type === "expense"), wfhs = list.filter(e => e.type === "wfh");
+  const wHours = r2(wfhs.reduce((a, e) => a + (e.hours || 0), 0)), months = new Map(), perP = new Map();
+  for (const w of wfhs) { const k = w.date.slice(0, 7), m = months.get(k) || { k, days: 0, hours: 0 }; m.days++; m.hours = r2(m.hours + (w.hours || 0)); months.set(k, m); perP.set(w.person, r2((perP.get(w.person) || 0) + (w.hours || 0))); }
+  // the ATO works the fixed-rate claim out per person on the year's hours, with cents disregarded
+  const wAmt = R.wfh ? [...perP.values()].reduce((a, h) => a + Math.floor(r2(h * R.wfhRate) + 1e-9), 0) : 0;
+  const wfh = { list: wfhs, days: wfhs.length, hours: wHours, amt: wAmt, exact: R.wfh ? r2(wHours * R.wfhRate) : 0, months: [...months.values()].sort((a, b) => a.k < b.k ? -1 : 1) };
   const groups = new Map(); // the km cap applies per person, per car
   for (const t of trips) { const k = t.person + "|" + (t.carId || t.car); const g = groups.get(k) || { person: t.person, carId: t.carId, car: t.car || "Car", km: 0, count: 0 }; g.km += t.km || 0; g.count++; groups.set(k, g); }
   const cars = [...groups.values()].map(g => { const claimKm = R.cpk ? Math.min(g.km, R.cap) : 0; return { ...g, km: r2(g.km), claimKm, over: R.cpk && g.km > R.cap, claim: r2(claimKm * R.rate) }; });
@@ -97,10 +137,10 @@ function calc(fy, pid) {
   const places = new Map(); for (const t of trips) { const p = places.get(t.place) || { name: t.place, count: 0, km: 0 }; p.count++; p.km += t.km || 0; places.set(t.place, p); }
   const catIds = [...(set.categories || []).map(c => c.id)]; for (const e of exps) if (!catIds.includes(e.catId)) catIds.push(e.catId);
   const cats = catIds.map(id => { const es = exps.filter(e => e.catId === id); const c = (set.categories || []).find(x => x.id === id); return { id, name: (c && c.name) || (es[0] && es[0].cat) || "Other", hidden: c && c.hidden, count: es.length, claim: r2(es.reduce((a, e) => a + expClaim(e), 0)) }; }).filter(c => !c.hidden || c.count);
-  const total = r2(carClaim + cats.reduce((a, c) => a + c.claim, 0));
-  const work = r2((R.stdCats.includes("car") ? carClaim : 0) + cats.filter(c => R.stdCats.includes(c.id)).reduce((a, c) => a + c.claim, 0));
+  const total = r2(carClaim + wAmt + cats.reduce((a, c) => a + c.claim, 0));
+  const work = r2((R.stdCats.includes("car") ? carClaim : 0) + (R.wfhInStd !== false ? wAmt : 0) + cats.filter(c => R.stdCats.includes(c.id)).reduce((a, c) => a + c.claim, 0));
   const std = R.std && pid ? { amt: R.stdAmt, work, onTop: r2(total - work), itemise: work > R.stdAmt, diff: r2(Math.abs(R.stdAmt - work)) } : null;
-  return { fy, R, trips, exps, cars, carClaim, km, places: [...places.values()].sort((a, b) => b.km - a.km), cats, total, std, count: list.length, sample: list.some(e => e.sample) };
+  return { fy, R, trips, exps, wfh, cars, carClaim, km, places: [...places.values()].sort((a, b) => b.km - a.km), cats, total, std, count: list.length, sample: list.some(e => e.sample) };
 }
 
 /* ================= icons ================= */
@@ -117,6 +157,7 @@ const IC = {
   back: svg('<path d="M15 18l-6-6 6-6"/>', 2),
   camera: svg('<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/>'),
   doc: svg('<path d="M7 3h7l5 5v13H7zM14 3v5h5"/>'),
+  house: svg('<path d="M4 11 12 4l8 7v9H4z"/><path d="M9 20v-5h6v5"/>'),
   lock: svg('<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>', 2)
 };
 
@@ -147,12 +188,21 @@ function banners() {
   if (m.conflict) out.push(`<div class="banner bad"><span>Dropbox has a different copy from this phone. Choose which one to keep.</span><button type="button" class="btn sm" data-act="goBackup">Choose</button></div>`);
   else if (!dbxOn() && S.entries.length) out.push(`<div class="banner"><span>These records are only on this phone. Connect Dropbox to keep them safe and share them with the other phone.</span><button type="button" class="btn sm primary" data-act="goBackup">Connect Dropbox</button></div>`);
   else if (dbxOn() && m.syncError) out.push(`<div class="banner bad"><span>${esc(m.syncError)}</span><button type="button" class="btn sm" data-act="goBackup">Open</button></div>`);
+  if (R.wfh && !R.wfhOk && S.entries.some(e => live(e) && e.type === "wfh" && fyOf(e.date) === R.fy)) out.push(`<div class="banner"><span>The ${R.fy} work-from-home rate (${cents(R.wfhRate)}/hour) is provisional until the ATO publishes it. Check it and tick “confirmed” in the ${R.fy} rules.</span><button type="button" class="btn sm" data-act="rulesEdit" data-id="${R.fy}">Check rate</button></div>`);
   if (R.inherited) out.push(`<div class="banner"><span>No rules set for ${R.fy} yet, so ${R.from || "the defaults"} rules are being used (${cents(R.rate)}/km${R.std ? `, ${money(R.stdAmt)} standard deduction` : ""}). Check them each July.</span><button type="button" class="btn sm" data-act="rulesNew" data-v="${R.fy}">Set ${R.fy}</button></div>`);
   return out.join("");
 }
 function viewHome() {
   const who = S.who || S.meta.me, pid = who === "all" ? null : who, c = calc(S.fy, pid), R = c.R;
-  const recent = S.entries.filter(e => live(e) && fyOf(e.date) === S.fy && (!pid || e.person === pid)).sort(byNewest).slice(0, 5);
+  const recent = S.entries.filter(e => live(e) && e.type !== "bill" && fyOf(e.date) === S.fy && (!pid || e.person === pid)).sort(byNewest).slice(0, 5);
+  let wfhCard = "";
+  if (R.wfh || c.wfh.days) {
+    const bl = pid ? billsFor(S.fy, pid) : [], have = bl.filter(x => x.held.length).length, miss = bl.filter(x => !x.held.length).map(x => x.k.name.split(" /")[0].toLowerCase());
+    wfhCard = `<div class="card"><div class="line"><h3>Work from home · fixed rate</h3><span class="small muted">${S.fy}</span></div>
+      <div class="row" style="align-items:baseline;gap:8px"><span class="kpi">${hrsf(c.wfh.hours).replace(" h", " hours")}</span><span class="small muted">${c.wfh.days} day${c.wfh.days === 1 ? "" : "s"}</span></div>
+      <div class="small" style="color:var(--ink-2)"><b style="color:var(--ink)">${money(c.wfh.amt)}</b> at ${cents(R.wfhRate)}/hour${R.wfhOk ? "" : ' <span class="tag warn">rate provisional</span>'}</div>
+      ${pid && bl.length ? `<button type="button" class="banner ${miss.length ? "" : "info"}" data-act="bills" style="border:0;cursor:pointer;text-align:left;font:inherit"><span>Bills held: ${have} of ${bl.length}${miss.length ? ` — add ${esc(miss.join(", "))}` : " ✓"}</span><b>Open</b></button>` : ""}</div>`;
+  }
   const carCards = R.cpk ? (c.cars.length ? c.cars : [{ car: (defCar() || {}).name || "Car", km: 0, count: 0, claim: 0, claimKm: 0, person: pid }]).map(g => `
     <div class="card"><div class="line"><h3>Car · cents per km</h3><span class="small muted">${esc(g.car)}${!pid ? " · " + esc(pName(g.person)) : ""}</span></div>
       <div class="row" style="align-items:baseline;gap:8px"><span class="kpi">${kmf(g.km)}</span><span class="small muted">of ${R.cap.toLocaleString("en-AU")} km cap</span></div>
@@ -166,37 +216,38 @@ function viewHome() {
   return `<section class="view">${banners()}
     ${seg(peopleOpts(true), who, "who")}
     ${fySelect("fyHome")}
-    <div class="duo"><button type="button" class="btn primary" data-act="addTrip">${IC.plus}Trip</button><button type="button" class="btn outline" data-act="addExpense">${IC.plus}Expense</button></div>
-    ${carCards}${stdCard}
+    <div class="trio"><button type="button" class="btn primary" data-act="addTrip">${IC.plus}Trip</button><button type="button" class="btn primary" data-act="addWfh">${IC.plus}WFH</button><button type="button" class="btn outline" data-act="addExpense">${IC.plus}Expense</button></div>
+    ${wfhCard}${carCards}${stdCard}
     <div class="card flat"><div class="line"><span>Total deductions so far${pid ? "" : " (both)"}</span><b>${money(c.total)}</b></div></div>
     <div class="sec"><h2 style="font-size:15px">Recent</h2><button type="button" class="btn ghost sm" data-act="tab" data-v="records">See all</button></div>
-    ${recent.length ? `<div class="list">${recent.map(liEntry).join("")}</div>` : `<div class="empty">Nothing recorded for ${S.fy} yet. Tap <b>Trip</b> after your next court day.</div>`}
+    ${recent.length ? `<div class="list">${recent.map(liEntry).join("")}</div>` : `<div class="empty">Nothing recorded for ${S.fy} yet. Tap <b>Trip</b> after a court day or <b>WFH</b> after a day at home.</div>`}
   </section>`;
 }
 function notCountedNames(R) { const n = visCats().filter(c => !R.stdCats.includes(c.id)).map(c => c.name.toLowerCase()); return n.length ? n.join(", ") : "none"; }
 const byNewest = (a, b) => a.date < b.date ? 1 : a.date > b.date ? -1 : (b.created || 0) - (a.created || 0);
 function liEntry(e) {
-  const trip = e.type === "trip";
-  const title = trip ? `${e.place}${e.purpose ? " · " + e.purpose : ""}` : (e.desc || e.cat || "Expense");
-  const sub = trip ? `${fmtDay(e.date)} · ${kmf(e.km)} · ${e.car || ""}` : `${fmtDay(e.date)} · ${e.cat || ""}${e.pct != null && e.pct < 100 ? ` · ${e.pct}% work` : ""}${(e.files || []).length ? " · receipt" : ""}`;
-  return `<button type="button" class="li ${e.removed ? "removed" : ""}" data-act="openEntry" data-id="${esc(e.id)}">${av(e.person)}<span class="t"><b>${esc(title)}</b><span>${esc(sub)}${e.removed ? ' <span class="tag bad">removed</span>' : ""}${e.sample ? ' <span class="tag">sample</span>' : ""}</span></span><span class="amt">${money(trip ? tripClaim(e) : expClaim(e))}</span></button>`;
+  const trip = e.type === "trip", wfh = e.type === "wfh";
+  const title = trip ? `${e.place}${e.purpose ? " · " + e.purpose : ""}` : wfh ? `Work from home${e.shift ? " · " + e.shift : ""}` : (e.desc || e.cat || "Expense");
+  const sub = trip ? `${fmtDay(e.date)} · ${kmf(e.km)} · ${e.car || ""}` : wfh ? `${fmtDay(e.date)} · ${t12(e.start)}–${t12(e.end)} · ${brkf(e.brk)} · ${hrsf(e.hours)}`
+    : `${fmtDay(e.date)} · ${e.cat || ""}${e.pct != null && e.pct < 100 ? ` · ${e.pct}% work` : ""}${(e.files || []).length ? " · receipt" : ""}`;
+  return `<button type="button" class="li ${e.removed ? "removed" : ""}" data-act="openEntry" data-id="${esc(e.id)}">${av(e.person)}<span class="t"><b>${esc(title)}</b><span>${esc(sub)}${e.removed ? ' <span class="tag bad">removed</span>' : ""}${e.sample ? ' <span class="tag">sample</span>' : ""}</span></span><span class="amt">${money(entryAmt(e))}</span></button>`;
 }
 function recFiltered() {
   const q = S.rec.q.trim().toLowerCase();
-  return S.entries.filter(e => fyOf(e.date) === S.fy && (S.rec.removed || live(e)) && (S.rec.type === "all" || e.type === S.rec.type) && (S.rec.who === "all" || e.person === S.rec.who)
-    && (!q || [e.place, e.purpose, e.desc, e.cat, e.notes, e.car, e.basis, pName(e.person)].join(" ").toLowerCase().includes(q))).sort(byNewest);
+  return S.entries.filter(e => e.type !== "bill" && e.date && fyOf(e.date) === S.fy && (S.rec.removed || live(e)) && (S.rec.type === "all" || e.type === S.rec.type) && (S.rec.who === "all" || e.person === S.rec.who)
+    && (!q || [e.place, e.purpose, e.desc, e.cat, e.notes, e.car, e.basis, e.shift, e.type === "wfh" ? "work from home wfh" : "", pName(e.person)].join(" ").toLowerCase().includes(q))).sort(byNewest);
 }
 function recListHTML() {
   const list = recFiltered(); if (!list.length) return `<div class="empty">No records match.</div>`;
   const groups = []; for (const e of list) { const k = e.date.slice(0, 7); let g = groups[groups.length - 1]; if (!g || g.k !== k) groups.push(g = { k, items: [] }); g.items.push(e); }
-  return groups.map(g => { const [y, m] = g.k.split("-"); const tot = g.items.filter(live).reduce((a, e) => a + (e.type === "trip" ? tripClaim(e) : expClaim(e)), 0);
+  return groups.map(g => { const [y, m] = g.k.split("-"); const tot = g.items.filter(live).reduce((a, e) => a + entryAmt(e), 0);
     return `<div class="month"><span>${MONTHS[+m - 1]} ${y}</span><span>${money(tot)}</span></div><div class="list">${g.items.map(liEntry).join("")}</div>`; }).join("");
 }
 function viewRecords() {
   return `<section class="view"><h1 style="font-size:24px">Records</h1>
     ${fySelect("fyRec")}
     <div class="field"><label for="recQ" style="position:absolute;left:-9999px">Search records</label><input id="recQ" type="search" placeholder="Search place, item or purpose" value="${esc(S.rec.q)}"></div>
-    ${seg([{ v: "all", l: "All" }, { v: "trip", l: "Trips" }, { v: "expense", l: "Expenses" }], S.rec.type, "recType")}
+    ${seg([{ v: "all", l: "All" }, { v: "trip", l: "Trips" }, { v: "wfh", l: "WFH" }, { v: "expense", l: "Expenses" }], S.rec.type, "recType")}
     ${seg(peopleOpts(true, "Both of us"), S.rec.who, "recWho")}
     <label class="check small"><input type="checkbox" id="recRemoved" ${S.rec.removed ? "checked" : ""}> Show removed records</label>
     <div class="note" style="display:flex;gap:8px;align-items:center"><span style="width:16px;height:16px;flex:none;display:flex">${IC.lock}</span>${S.fy} records are kept until ${fmtDate(keepUntil(S.fy))}. Every change is logged.</div>
@@ -206,14 +257,19 @@ function viewSummary() {
   const who = S.sumWho || S.meta.me, pid = who === "all" ? null : who, c = calc(S.fy, pid), R = c.R;
   const rows = [
     ...(R.cpk || c.cars.length ? (c.cars.length ? c.cars : [{ car: "Car", km: 0, count: 0, claim: 0 }]).map(g => ({ name: "Car · cents per km", sub: `${g.car}${!pid && g.person ? " · " + pName(g.person) : ""} · ${kmf(g.over ? g.claimKm : g.km)} × ${cents(R.rate)} · ${g.count} trip${g.count === 1 ? "" : "s"}${g.over ? ` (capped from ${kmf(g.km)})` : ""}`, amt: g.claim })) : []),
+    ...(R.wfh || c.wfh.days ? [{ name: "Working from home · fixed rate", sub: c.wfh.days ? `${hrsf(c.wfh.hours)} × ${cents(R.wfhRate)}/hour · ${c.wfh.days} day${c.wfh.days === 1 ? "" : "s"}${R.wfhOk ? "" : " · rate provisional"}${c.wfh.exact !== c.wfh.amt ? " · cents disregarded" : ""}` : "None", amt: c.wfh.amt }] : []),
     ...c.cats.map(x => ({ name: x.name, sub: x.count ? `${x.count} item${x.count === 1 ? "" : "s"}` : "None", amt: x.claim }))
   ];
+  const bl = pid ? billsFor(S.fy, pid) : [], bHave = bl.filter(x => x.held.length).length;
+  const maxWm = Math.max(1, ...c.wfh.months.map(m => m.hours));
+  const wfhMonths = c.wfh.days ? `<div class="card"><h3>Work from home by month</h3>${c.wfh.months.map(m => { const [y, mo] = m.k.split("-"); return `<div><div class="line"><span>${MON[+mo - 1]} ${y}</span><span>${m.days} day${m.days === 1 ? "" : "s"} · ${hrsf(m.hours)}</span></div><div class="bar" style="height:6px;margin-top:4px"><i style="width:${(m.hours / maxWm * 100).toFixed(1)}%"></i></div></div>`; }).join("")}
+    ${pid && bl.length ? `<button type="button" class="banner ${bHave < bl.length ? "" : "info"}" data-act="bills" style="border:0;cursor:pointer;text-align:left;font:inherit"><span>Bills held: ${bHave} of ${bl.length}</span><b>Open</b></button>` : ""}</div>` : "";
   const maxKm = Math.max(1, ...c.places.map(p => p.km));
   return `<section class="view"><h1 style="font-size:24px">Tax year summary</h1>
     ${fySelect("fySum")}
     ${seg(peopleOpts(true, "Household"), who, "sumWho")}
     <div class="card"><div class="small" style="color:var(--ink-2)">Total deductions · ${fyRange(S.fy)}</div><div class="kpi" style="font-size:34px">${money(c.total)}</div>
-      <div class="small" style="color:var(--ink-2)">${c.trips.length} trip${c.trips.length === 1 ? "" : "s"} · ${c.exps.length} expense${c.exps.length === 1 ? "" : "s"}${c.sample ? ' · <span class="tag warn">includes sample data</span>' : ""}</div></div>
+      <div class="small" style="color:var(--ink-2)">${c.trips.length} trip${c.trips.length === 1 ? "" : "s"} · ${c.wfh.days} WFH day${c.wfh.days === 1 ? "" : "s"} · ${c.exps.length} expense${c.exps.length === 1 ? "" : "s"}${c.sample ? ' · <span class="tag warn">includes sample data</span>' : ""}</div></div>
     ${c.std ? `<div class="card"><h3>Itemised vs standard deduction</h3>
       <div class="line"><span>Work-related items counted toward it</span><b>${money(c.std.work)}</b></div>
       <div class="line"><span>Standard deduction ${S.fy}</span><b>${money(c.std.amt)}</b></div>
@@ -221,7 +277,8 @@ function viewSummary() {
       <div class="small" style="color:var(--ink-2)">${c.std.itemise ? `Itemising gives ${money(c.std.diff)} more.` : `The standard deduction gives ${money(c.std.diff)} more.`} If you itemise you must keep all the records, not just those above ${money(c.std.amt)}.</div></div>` : ""}
     <div class="list">${rows.map(r => `<div class="li" style="cursor:default"><span class="t"><b>${esc(r.name)}</b><span>${esc(r.sub)}</span></span><span class="amt">${money(r.amt)}</span></div>`).join("")}</div>
     ${c.places.length ? `<div class="card"><h3>Trips by place</h3>${c.places.map(p => `<div><div class="line"><span>${esc(p.name)}</span><span>${p.count} trip${p.count === 1 ? "" : "s"} · ${kmf(p.km)}</span></div><div class="bar" style="height:6px;margin-top:4px"><i style="width:${(p.km / maxKm * 100).toFixed(1)}%"></i></div></div>`).join("")}</div>` : ""}
-    <div class="note">Rules for ${S.fy}: ${R.cpk ? `${cents(R.rate)}/km, ${R.cap.toLocaleString("en-AU")} km cap per car` : "cents per km off"}${R.std ? `, ${money(R.stdAmt)} standard deduction` : ", no standard deduction"}${R.inherited ? ` (borrowed from ${R.from || "defaults"} — set them in Settings)` : ""}. Records kept until ${fmtDate(keepUntil(S.fy))}.</div>
+    ${wfhMonths}
+    <div class="note">Rules for ${S.fy}: ${R.cpk ? `${cents(R.rate)}/km, ${R.cap.toLocaleString("en-AU")} km cap per car` : "cents per km off"}${R.wfh ? `, work from home ${cents(R.wfhRate)}/hour${R.wfhOk ? "" : " (provisional)"}` : ""}${R.std ? `, ${money(R.stdAmt)} standard deduction` : ", no standard deduction"}${R.inherited ? ` (borrowed from ${R.from || "defaults"} — set them in Settings)` : ""}. Records kept until ${fmtDate(keepUntil(S.fy))}.</div>
     ${!pid ? `<div class="line small" style="color:var(--ink-2);padding:0 2px"><span>By person</span><span>${people().map(p => `${esc(p.name)} ${money(calc(S.fy, p.id).total)}`).join(" · ")}</span></div>` : ""}
     <button type="button" class="btn primary big" data-act="report">${IC.doc}Run end-of-year PDF</button>
   </section>`;
@@ -231,13 +288,15 @@ function viewSettings() {
   const li = (act, id, label, sub, val) => `<button type="button" class="li" data-act="${act}" data-id="${esc(id)}"><span class="t"><b>${esc(label)}</b>${sub ? `<span>${esc(sub)}</span>` : ""}</span><span class="amt" style="color:var(--accent);font-weight:500">${esc(val || "Edit")}</span></button>`;
   const add = (act, label) => `<button type="button" class="li" data-act="${act}" data-id=""><span class="t"><b style="color:var(--accent)">${esc(label)}</b></span><span class="amt" style="color:var(--accent)">+</span></button>`;
   const fys = Object.keys(st.rules || {}).sort().reverse(), nfy = fys.length ? nextFy(fys[0]) : fyOf(todayISO());
-  const ruleSub = r => `${r.cpk ? `${cents(r.rate)}/km · ${(+r.cap).toLocaleString("en-AU")} km cap` : "cents per km off"} · ${r.std ? money(r.stdAmt) + " standard" : "no standard"}`;
+  const ruleSub = r => `${r.cpk ? `${cents(r.rate)}/km · ${(+r.cap).toLocaleString("en-AU")} km cap` : "cents per km off"} · ${r.wfh ? `WFH ${cents(r.wfhRate)}/h${r.wfhOk ? "" : " (provisional)"}` : "WFH off"} · ${r.std ? money(r.stdAmt) + " standard" : "no standard"}`;
   const samples = S.entries.filter(e => e.sample).length;
   return `<section class="view"><h1 style="font-size:24px">Settings</h1>
     <div class="field"><h3>This phone belongs to</h3>${seg(people().map(p => ({ v: p.id, l: p.name })), S.meta.me, "setMe")}</div>
     ${sec("Saved places", "Return trip from usual workplace", [...(st.places || []).map(p => li("editItem", "place:" + p.id, p.name, p.hidden ? "Hidden" : "", kmf(p.km))), add("editItem", "Add place").replace('data-id=""', 'data-id="place:"')])}
     ${sec("Cars", `${(rulesFor(fyOf(todayISO())).cap || 0).toLocaleString("en-AU")} km cap per car`, [...(st.cars || []).map(c => li("editItem", "car:" + c.id, c.name, [c.isDefault && "Default", c.hidden && "Hidden"].filter(Boolean).join(" · "))), add("editItem", "Add car").replace('data-id=""', 'data-id="car:"')])}
-    ${sec("Tax year rules", "Set once each July", [...fys.map(f => li("rulesEdit", f, f, ruleSub({ ...DEFAULT_RULE, ...st.rules[f] }))), add("rulesNew", `Start ${nfy} (copies ${fys[0] || "defaults"})`).replace('data-id=""', `data-v="${nfy}"`)])}
+    ${sec("Tax year rules", "Set once each July", [...fys.map(f => li("rulesEdit", f, f, ruleSub(rulesFor(f)))), add("rulesNew", `Start ${nfy} (copies ${fys[0] || "defaults"})`).replace('data-id=""', `data-v="${nfy}"`)])}
+    ${sec("Work-from-home shifts", "Saved times for one-tap entry", [...(st.shifts || []).map(x => li("editItem", "shift:" + x.id, `${pName(x.person)} · ${x.name}`, `${t12(x.start)} – ${t12(x.end)} · ${brkf(x.brk)} · ${hrsf(shiftHours(x.start, x.end, x.brk))}${x.hidden ? " · Hidden" : ""}`)), add("editItem", "Add shift").replace('data-id=""', 'data-id="shift:"')])}
+    ${sec("Bills checklist", "Evidence for the WFH fixed rate", [...(st.billKinds || []).map(k => li("editItem", "billkind:" + k.id, k.name, k.hidden ? "Hidden" : "")), add("editItem", "Add bill type").replace('data-id=""', 'data-id="billkind:"')])}
     ${sec("Categories", "Rename, add or hide", [...(st.categories || []).map(c => li("editItem", "category:" + c.id, c.name, c.hidden ? "Hidden" : "")), add("editItem", "Add category").replace('data-id=""', 'data-id="category:"')])}
     ${sec("Purposes", "", [...(st.purposes || []).map((p, i) => li("editItem", "purpose:" + i, p, "")), add("editItem", "Add purpose").replace('data-id=""', 'data-id="purpose:"')])}
     ${sec("People", "Each has their own totals", [...people().map(p => li("editItem", "person:" + p.id, p.name, "")), add("editItem", "Add person").replace('data-id=""', 'data-id="person:"')])}
@@ -251,17 +310,17 @@ function viewSettings() {
 
 /* ================= sheets (full-screen forms) ================= */
 function openSheet(sh) { S.sheet = sh; renderSheet(); }
-function closeSheet() { S.sheet = null; const el = $("#sheet"); el.hidden = true; el.innerHTML = ""; document.body.style.overflow = ""; render(); }
+function closeSheet() { const back = S.sheet && S.sheet.back; S.sheet = null; if (back) { render(); openSheet(back); return; } const el = $("#sheet"); el.hidden = true; el.innerHTML = ""; document.body.style.overflow = ""; render(); }
 function sheetFrame(title, body, foot) {
   return `<div class="sh-head"><button type="button" class="iconbtn" data-act="closeSheet" aria-label="Back">${IC.back}</button><h2>${esc(title)}</h2><span style="width:44px"></span></div>
     <div class="sh-body"><div class="wrap view">${body}</div></div>${foot ? `<div class="sh-foot"><div class="wrap">${foot}</div></div>` : ""}`;
 }
 function renderSheet() {
   const el = $("#sheet"), body = $(".sh-body", el), sc = body ? body.scrollTop : 0, sh = S.sheet; if (!sh) return;
-  const html = sh.kind === "trip" ? sheetTrip() : sh.kind === "expense" ? sheetExpense() : sh.kind === "rules" ? sheetRules() : sh.kind === "item" ? sheetItem() : sh.kind === "report" ? sheetReport() : sh.kind === "backup" ? sheetBackup() : "";
+  const html = sh.kind === "trip" ? sheetTrip() : sh.kind === "expense" ? sheetExpense() : sh.kind === "wfh" ? sheetWfh() : sh.kind === "bills" ? sheetBills() : sh.kind === "bill" ? sheetBill() : sh.kind === "rules" ? sheetRules() : sh.kind === "item" ? sheetItem() : sh.kind === "report" ? sheetReport() : sh.kind === "backup" ? sheetBackup() : "";
   el.innerHTML = html; el.hidden = false; document.body.style.overflow = "hidden";
   const nb = $(".sh-body", el); if (nb && sh.keepScroll !== false) nb.scrollTop = sc;
-  if (sh.kind === "expense") paintThumbs();
+  if (sh.kind === "expense" || sh.kind === "bill") paintThumbs();
 }
 const placeById = id => (SET().places || []).find(p => p.id === id);
 const carById = id => (SET().cars || []).find(c => c.id === id);
@@ -413,17 +472,19 @@ async function saveExpense() {
   f.added = []; await reload(); closeSheet(); toast(edit ? "Expense updated" : `Expense saved · ${money(r2(amt * pct / 100))}`);
 }
 async function cancelSheet() {
-  if (S.sheet && S.sheet.kind === "expense") for (const id of S.sheet.f.added || []) await dbDel("files", id);
+  if (S.sheet && (S.sheet.kind === "expense" || S.sheet.kind === "bill")) for (const id of S.sheet.f.added || []) await dbDel("files", id);
   closeSheet();
 }
 function openEntry(id) {
   const e = S.entries.find(x => x.id === id); if (!e) return;
+  if (e.type === "wfh") { openSheet({ kind: "wfh", id, f: { person: e.person, shiftId: e.shiftId || "", start: e.start, end: e.end, brk: e.brk ?? 0, date: e.date, days: [], month: e.date.slice(0, 7), notes: e.notes || "" } }); return; }
+  if (e.type === "bill") { openBill(e.id); return; }
   if (e.type === "trip") openSheet({ kind: "trip", id, f: { person: e.person, placeId: e.placeId && placeById(e.placeId) ? e.placeId : "other", km: e.km, otherName: e.placeId && placeById(e.placeId) ? "" : e.place, saveOther: false, mode: "day", date: e.date, purpose: e.purpose || "", carId: e.carId || "", notes: e.notes || "" } });
   else openSheet({ kind: "expense", id, f: { person: e.person, date: e.date, catId: e.catId, desc: e.desc || "", amount: e.amount ?? "", pct: e.pct ?? 100, basis: e.basis || "", notes: e.notes || "", files: [...(e.files || [])], added: [] } });
 }
 async function setRemoved(flag) {
   const o = S.entries.find(x => x.id === S.sheet.id); if (!o) return;
-  if (flag && !confirm(`Remove this record? It stops counting in totals but is kept, and can be restored, until ${fmtDate(keepUntil(fyOf(o.date)))}.`)) return;
+  if (flag && !confirm(`Remove this record? It stops counting in totals but is kept, and can be restored, until ${fmtDate(keepUntil(entryFy(o)))}.`)) return;
   const n = { ...clone(o), removed: flag || undefined, log: [...(o.log || []), { at: new Date().toISOString(), by: pName(S.meta.me), act: flag ? "Removed" : "Restored" }] };
   if (!flag) delete n.removed;
   await dbPut("entries", n); await reload(); closeSheet(); toast(flag ? "Record removed (it can be restored from Records › Show removed)" : "Record restored");
@@ -435,15 +496,148 @@ async function purgeEntry() {
   await dbDel("entries", o.id); await reload(); closeSheet(); toast("Record deleted");
 }
 
+/* --- work from home (fixed rate method) --- */
+function newWfh(pid) {
+  const person = pid || ((S.who && S.who !== "all") ? S.who : S.meta.me), shs = shiftsFor(person), last = ((S.meta.lastShift || {})[person]);
+  const sh = shs.find(x => x.id === last) || shs[0];
+  return { person, shiftId: sh ? sh.id : "", start: sh ? sh.start : "", end: sh ? sh.end : "", brk: sh ? sh.brk : 0, days: [], month: todayISO().slice(0, 7), notes: "" };
+}
+function wfhLine(f) { const h = shiftHours(f.start, f.end, f.brk); return h == null ? "Enter start and finish times" : `${hrsf(h)} a day${(num(f.brk) || 0) ? ` after the ${num(f.brk)} min unpaid break` : ""}${overnight(f.start, f.end) ? " · overnight, counted on the date the shift starts" : ""}`; }
+function wfhFoot() {
+  const f = S.sheet.f, edit = !!S.sheet.id, n = edit ? 1 : f.days.length, h = shiftHours(f.start, f.end, f.brk) || 0;
+  const R = rulesFor(fyOf((edit ? f.date : [...f.days].sort()[0]) || todayISO())), tot = r2(h * n), claim = R.wfh ? r2(tot * R.wfhRate) : 0;
+  const txt = !n ? "Tap the days you worked at home" : n > 1 ? `${n} days × ${hrsf(h)} = ${hrsf(tot)} at ${cents(R.wfhRate)}/h` : `${hrsf(h)} at ${cents(R.wfhRate)}/hour`;
+  return `<div class="sum"><span>${esc(txt)}</span><b>${money(claim)}</b></div><button type="button" class="btn primary big" data-act="saveWfh" ${n ? "" : "disabled"}>${edit ? "Save changes" : n ? `Save ${n} day${n === 1 ? "" : "s"}` : "Select days"}</button>`;
+}
+function calHTML(f) {
+  const [y, m] = f.month.split("-").map(Number), first = new Date(y, m - 1, 1), lead = (first.getDay() + 6) % 7, dim = new Date(y, m, 0).getDate(), today = todayISO();
+  const rec = new Set(S.entries.filter(e => live(e) && e.type === "wfh" && e.person === f.person && e.date.startsWith(f.month)).map(e => e.date));
+  let cells = ""; for (let i = 0; i < lead; i++) cells += `<span></span>`;
+  for (let d = 1; d <= dim; d++) {
+    const iso = `${y}-${p2(m)}-${p2(d)}`, on = f.days.includes(iso), fut = iso > today, wd = (lead + d - 1) % 7;
+    cells += `<button type="button" class="cal-d ${on ? "on" : ""} ${wd >= 5 ? "we" : ""} ${iso === today ? "today" : ""}" data-act="wDay" data-v="${iso}" ${fut ? "disabled" : ""} aria-pressed="${on}" aria-label="${fmtDay(iso)}${rec.has(iso) ? ", already recorded" : ""}">${d}${rec.has(iso) ? "<i></i>" : ""}</button>`;
+  }
+  const nextOk = f.month < today.slice(0, 7);
+  return `<div class="cal"><div class="cal-h"><button type="button" class="iconbtn" data-act="wMonth" data-v="-1" aria-label="Previous month">${IC.back}</button><b>${MONTHS[m - 1]} ${y}</b>
+    <button type="button" class="iconbtn" data-act="wMonth" data-v="1" aria-label="Next month" ${nextOk ? "" : "disabled"} style="transform:scaleX(-1)">${IC.back}</button></div>
+    <div class="cal-g">${["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map(x => `<span class="cal-w">${x}</span>`).join("")}${cells}</div></div>
+    <div class="row xs muted" style="gap:14px"><span>${f.days.length} selected</span><span style="display:flex;align-items:center;gap:5px"><i style="width:6px;height:6px;border-radius:50%;background:var(--head);display:inline-block"></i>already recorded</span><span>future days locked</span>${f.days.length ? `<span class="sp"></span><button type="button" class="btn ghost sm" data-act="wClear">Clear</button>` : ""}</div>`;
+}
+function sheetWfh() {
+  const f = S.sheet.f, edit = !!S.sheet.id, e = edit ? S.entries.find(x => x.id === S.sheet.id) : null, shs = shiftsFor(f.person);
+  const body = `${seg(people().map(p => ({ v: p.id, l: p.name })), f.person, "wPerson")}
+    <div class="field"><span class="flabel">Shift</span><div class="chips">${shs.map(x => `<button type="button" class="chip ${f.shiftId === x.id ? "on" : ""}" data-act="wShift" data-v="${x.id}" style="height:auto;min-height:52px;padding:6px 16px;text-align:left;border-radius:12px"><b style="display:block;font-size:14px">${esc(x.name)}</b><span style="font-size:12px;opacity:.85">${t12(x.start)} – ${t12(x.end)}</span></button>`).join("")}
+      <button type="button" class="chip ${f.shiftId ? "add" : "on"}" data-act="wShift" data-v="" style="min-height:52px;border-radius:12px">Other times</button></div>
+      <span class="hint" id="wfhLine">${esc(wfhLine(f))}</span></div>
+    ${edit ? `<div class="field"><label for="wDate">Date</label><input id="wDate" type="date" data-f="date" value="${esc(f.date)}" max="${todayISO()}"><span class="hint">${esc(fmtDay(f.date))}</span></div>`
+      : `<div class="field"><span class="flabel">Tap the days you worked at home</span>${calHTML(f)}</div>`}
+    <div class="grid3"><div class="field"><label for="wStart">Start</label><input id="wStart" type="time" data-f="start" value="${esc(f.start)}"></div>
+      <div class="field"><label for="wEnd">Finish</label><input id="wEnd" type="time" data-f="end" value="${esc(f.end)}"></div>
+      <div class="field"><label for="wBrk">Unpaid break (min)</label><input id="wBrk" data-f="brk" inputmode="numeric" value="${esc(f.brk)}"></div></div>
+    <span class="hint" style="margin-top:-10px">Change the times if a day was different — the saved shift stays as it is.</span>
+    <div class="field"><label for="wNotes">Notes (optional)</label><input id="wNotes" data-f="notes" value="${esc(f.notes)}"></div>
+    ${edit ? removeButtons(e) + historyHTML(e) : ""}`;
+  return sheetFrame(edit ? "Edit work from home" : "Work from home", body, `<div id="foot">${wfhFoot()}</div>`);
+}
+async function saveWfh() {
+  const f = S.sheet.f, edit = S.sheet.id;
+  if (edit) { const v = ($("#wDate") || {}).value; if (/^\d{4}-\d{2}-\d{2}$/.test(v || "")) f.date = v; }
+  ["start", "end", "brk"].forEach(k => { const el = $(k === "start" ? "#wStart" : k === "end" ? "#wEnd" : "#wBrk"); if (el) f[k] = el.value; });
+  const ds = edit ? [f.date] : [...f.days].sort(), h = shiftHours(f.start, f.end, f.brk);
+  if (!ds.length || !ds[0]) { toast(edit ? "Pick a date" : "Tap the days you worked at home"); return; }
+  if (ds.some(d => d > todayISO())) { toast("Future days can't be recorded yet"); return; }
+  if (h == null) { toast("Enter the start and finish times"); return; }
+  if (!(h > 0)) { toast("The break is as long as the shift"); return; }
+  const sh = (SET().shifts || []).find(x => x.id === f.shiftId), brk = Math.max(0, Math.round(num(f.brk) || 0));
+  const dup = ds.filter(d => S.entries.some(x => live(x) && x.type === "wfh" && x.id !== edit && x.person === f.person && x.date === d));
+  if (dup.length && !confirm(`${pName(f.person)} already has work from home recorded on ${dup.map(fmtDay).join(", ")}. Save anyway?`)) return;
+  const by = pName(S.meta.me), at = new Date().toISOString();
+  const base = { person: f.person, shiftId: f.shiftId || null, shift: sh ? sh.name : "", start: f.start, end: f.end, brk, hours: h, notes: (f.notes || "").trim() };
+  if (edit) {
+    const o = S.entries.find(x => x.id === edit), n = { ...clone(o), ...base, date: f.date };
+    const ch = diffText(o, n, { date: ["date", fmtDate], start: ["start", t12], end: ["finish", t12], brk: ["break (min)"], hours: ["hours"], person: ["person", pName], notes: ["notes"] });
+    if (!ch) { closeSheet(); return; }
+    n.log = [...(o.log || []), { at, by, act: "Changed " + ch }]; await dbPut("entries", n);
+  } else {
+    let i = 0; for (const d of ds) await dbPut("entries", { id: uid("w") + (i++), type: "wfh", date: d, ...base, created: Date.now(), log: [{ at, by, act: "Added" }] });
+    S.meta.lastShift = { ...(S.meta.lastShift || {}), [f.person]: f.shiftId }; await saveMeta();
+  }
+  await reload(); const R = rulesFor(fyOf(ds[0])); closeSheet();
+  toast(edit ? "Work from home updated" : `${ds.length} day${ds.length === 1 ? "" : "s"} saved · ${hrsf(r2(h * ds.length))} · ${money(R.wfh ? r2(h * ds.length * R.wfhRate) : 0)}`);
+}
+
+/* --- bills held (evidence for the fixed rate) --- */
+function sheetBills() {
+  const f = S.sheet.f, bl = billsFor(f.fy, f.person), have = bl.filter(x => x.held.length).length;
+  const rows = []; for (const x of bl) {
+    if (!x.held.length) rows.push(`<div class="li" style="cursor:default"><span class="bdg no" aria-hidden="true">!</span><span class="t"><b>${esc(x.k.name)}</b><span>No bill yet</span></span><button type="button" class="btn primary sm" data-act="addBill" data-v="${x.k.id}">Add</button></div>`);
+    else for (const b of x.held) rows.push(`<button type="button" class="li" data-act="openEntry" data-id="${b.id}"><span class="bdg ok" aria-hidden="true">✓</span><span class="t"><b>${esc(x.k.name)}</b><span>${esc([b.desc, b.date && fmtDate(b.date), (b.covers || []).length > 1 ? "shared" : ""].filter(Boolean).join(" · "))}${(b.files || []).length ? "" : ' <span class="tag warn">no copy attached</span>'}</span></span><span class="amt" style="color:var(--accent);font-weight:500">View</span></button>`);
+  }
+  const body = `<div class="note">The ATO needs one bill or receipt for each running cost the fixed rate covers. One a year is enough — it shows you paid that kind of cost. Bills don't change the claim, which is always hours × rate.</div>
+    ${seg(people().map(p => ({ v: p.id, l: p.name })), f.person, "bPerson")}
+    <div class="sec"><h3>${esc(pName(f.person))} · ${f.fy}</h3><span class="xs muted">${have} of ${bl.length} held</span></div>
+    <div class="list">${rows.join("")}</div>
+    <button type="button" class="btn" data-act="addBill" data-v="">${IC.plus}Add another bill</button>
+    <span class="hint">Bill types can be changed in Settings › Bills checklist.</span>`;
+  return sheetFrame(`Bills held · ${f.fy}`, body, "");
+}
+function openBills(fy, pid) { openSheet({ kind: "bills", f: { fy: fy || S.fy, person: pid || ((S.who && S.who !== "all") ? S.who : S.meta.me) } }); }
+function newBill(kind, back) {
+  const fy = back ? back.f.fy : S.fy, today = todayISO();
+  return { kind: kind || ((SET().billKinds || []).find(k => !k.hidden) || {}).id || "", desc: "", date: fyOf(today) === fy ? today : fyEnd(fy), fy, covers: people().map(p => p.id), files: [], added: [], notes: "" };
+}
+function openBill(id) {
+  const b = S.entries.find(x => x.id === id); if (!b) return;
+  const back = S.sheet && S.sheet.kind === "bills" ? S.sheet : { kind: "bills", f: { fy: entryFy(b), person: (b.covers || [])[0] || S.meta.me } };
+  openSheet({ kind: "bill", id, back, f: { kind: b.kind, desc: b.desc || "", date: b.date, fy: entryFy(b), covers: [...(b.covers || [])], files: [...(b.files || [])], added: [], notes: b.notes || "" } });
+}
+function sheetBill() {
+  const f = S.sheet.f, edit = !!S.sheet.id, e = edit ? S.entries.find(x => x.id === S.sheet.id) : null;
+  const kinds = (SET().billKinds || []).filter(k => !k.hidden || k.id === f.kind);
+  const body = `<div class="field"><span class="flabel">Bill type</span><div class="chips">${kinds.map(k => `<button type="button" class="chip ${f.kind === k.id ? "on" : ""}" data-act="bKind" data-v="${k.id}">${esc(k.name)}</button>`).join("")}</div></div>
+    <div class="field"><label for="bDesc">What it is</label><input id="bDesc" data-f="desc" value="${esc(f.desc)}" placeholder="e.g. AGL electricity, Jul–Sep quarter"></div>
+    <div class="grid2"><div class="field"><label for="bDate">Bill date</label><input id="bDate" type="date" data-f="date" value="${esc(f.date)}"></div>
+      <div class="field"><label for="bFy">For tax year</label><select id="bFy" data-f="fy">${fyList().map(x => `<option ${x === f.fy ? "selected" : ""}>${x}</option>`).join("")}</select></div></div>
+    <div class="field"><span class="flabel">Covers</span>${people().map(p => `<label class="check"><input type="checkbox" data-cov="${p.id}" ${f.covers.includes(p.id) ? "checked" : ""}> ${esc(p.name)}</label>`).join("")}<span class="hint">Tick both for a shared household bill.</span></div>
+    <div class="field"><span class="flabel">Copy of the bill</span><div class="thumbs" id="thumbs"></div>
+      <label class="btn" style="border-style:dashed;color:var(--accent)">${IC.camera}Add photo or PDF<input type="file" id="eFile" accept="image/*,application/pdf" multiple hidden></label></div>
+    <div class="field"><label for="bNotes">Notes (optional)</label><input id="bNotes" data-f="notes" value="${esc(f.notes)}"></div>
+    ${edit ? removeButtons(e) + historyHTML(e) : ""}`;
+  return sheetFrame(edit ? "Bill held" : "Add bill", body, `<button type="button" class="btn primary big" data-act="saveBill">${edit ? "Save changes" : "Save bill"}</button>`);
+}
+async function saveBill() {
+  const f = S.sheet.f, edit = S.sheet.id;
+  if (!f.kind) { toast("Pick the bill type"); return; }
+  if (!f.covers.length) { toast("Tick who the bill covers"); return; }
+  if (!f.files.length && !confirm("No copy of the bill is attached. Save anyway?")) return;
+  const by = pName(S.meta.me), at = new Date().toISOString(), kn = ((SET().billKinds || []).find(k => k.id === f.kind) || {}).name || "Bill";
+  const base = { kind: f.kind, kindName: kn, desc: f.desc.trim(), date: f.date || todayISO(), fy: f.fy, covers: [...f.covers], person: f.covers[0], files: [...f.files], notes: f.notes.trim() };
+  if (edit) {
+    const o = S.entries.find(x => x.id === edit), n = { ...clone(o), ...base };
+    let ch = diffText(o, n, { kindName: ["type"], desc: ["description"], date: ["date", fmtDate], fy: ["tax year"], notes: ["notes"] });
+    if ((o.covers || []).join() !== n.covers.join()) ch = [ch, "covers " + n.covers.map(pName).join(" & ")].filter(Boolean).join(", ");
+    const fa = n.files.filter(x => !(o.files || []).includes(x)).length, gone = (o.files || []).filter(x => !n.files.includes(x));
+    if (fa) ch = [ch, `${fa} copy added`].filter(Boolean).join(", "); if (gone.length) ch = [ch, `${gone.length} copy removed`].filter(Boolean).join(", ");
+    if (ch) { n.log = [...(o.log || []), { at, by, act: "Changed " + ch }]; await dbPut("entries", n); for (const id of gone) await dbDel("files", id); }
+  } else await dbPut("entries", { id: uid("b"), type: "bill", ...base, created: Date.now(), log: [{ at, by, act: "Added" }] });
+  for (const id of f.added.filter(x => !f.files.includes(x))) await dbDel("files", id);
+  f.added = []; await reload(); closeSheet(); toast(edit ? "Bill updated" : "Bill saved");
+}
+
 /* --- tax year rules --- */
 function sheetRules() {
-  const f = S.sheet.f, st = SET(), used = S.entries.some(e => fyOf(e.date) === f.fy);
-  const cats = [{ id: "car", name: "Car · cents per km" }, ...(st.categories || []).filter(c => !c.hidden || f.stdCats.includes(c.id))];
+  const f = S.sheet.f, st = SET(), used = S.entries.some(e => e.date && entryFy(e) === f.fy);
+  const cats = [{ id: "car", name: "Car · cents per km" }, { id: "wfh", name: "Working from home" }, ...(st.categories || []).filter(c => !c.hidden || f.stdCats.includes(c.id))];
   const body = `<div class="note">Rules are saved per tax year. Changing ${f.fy} never changes another year, so past summaries and PDFs stay as they were lodged.</div>
     <div class="field"><h3>Car · cents per km</h3>
       <label class="check"><input type="checkbox" data-f="cpk" ${f.cpk ? "checked" : ""}> Cents per km method available</label>
       <div class="grid2"><div class="field"><label for="rRate">Rate (cents per km)</label><input id="rRate" data-f="rateC" inputmode="decimal" value="${esc(f.rateC)}"></div>
       <div class="field"><label for="rCap">Km cap per car</label><input id="rCap" data-f="cap" inputmode="numeric" value="${esc(f.cap)}"></div></div></div>
+    <div class="field"><h3>Work from home · fixed rate method</h3>
+      <label class="check"><input type="checkbox" data-f="wfh" ${f.wfh ? "checked" : ""}> Fixed rate method available</label>
+      <div class="field"><label for="rWfh">Rate (cents per hour worked from home)</label><input id="rWfh" data-f="wfhRateC" inputmode="decimal" value="${esc(f.wfhRateC)}"></div>
+      <label class="check"><input type="checkbox" data-f="wfhOk" ${f.wfhOk ? "checked" : ""}> Rate confirmed by the ATO</label>
+      <span class="hint">Leave unticked while the ATO hasn't published this year's rate — Home shows a reminder until it's confirmed.</span></div>
     <div class="field"><h3>Standard deduction</h3>
       <label class="check"><input type="checkbox" data-f="std" ${f.std ? "checked" : ""}> Applies this year</label>
       <div class="field"><label for="rStd">Amount</label><input id="rStd" data-f="stdAmt" inputmode="decimal" value="${esc(f.stdAmt)}"></div>
@@ -454,14 +648,16 @@ function sheetRules() {
     ${!used && st.rules && st.rules[f.fy] ? `<div class="row"><button type="button" class="btn danger" data-act="rulesDelete">Delete ${f.fy} rules</button></div>` : ""}`;
   return sheetFrame(`${f.fy} rules`, body, `<button type="button" class="btn primary big" data-act="rulesSave">Save ${f.fy} rules</button>`);
 }
-function openRules(fy, copy) { const r = rulesFor(fy); openSheet({ kind: "rules", f: { fy, cpk: r.cpk, rateC: r2(r.rate * 100), cap: r.cap, std: r.std, stdAmt: r.stdAmt, stdCats: [...r.stdCats], instant: r.instant, isNew: !!copy } }); }
+function openRules(fy, copy) { const r = rulesFor(fy); openSheet({ kind: "rules", f: { fy, cpk: r.cpk, rateC: r2(r.rate * 100), cap: r.cap, std: r.std, stdAmt: r.stdAmt, stdCats: [...r.stdCats.filter(x => x !== "wfh"), ...(r.wfhInStd !== false ? ["wfh"] : [])], instant: r.instant, wfh: r.wfh, wfhRateC: r2(r.wfhRate * 100), wfhOk: r.wfhOk, isNew: !!copy } }); }
 async function rulesSave() {
   const f = S.sheet.f, rate = num(f.rateC), cap = num(f.cap), stdAmt = num(f.stdAmt), instant = num(f.instant);
   if (f.cpk && !(rate > 0 && rate < 1000)) { toast("Enter the rate in cents, e.g. 91"); return; }
   if (f.cpk && !(cap > 0)) { toast("Enter the km cap"); return; }
   if (f.std && !(stdAmt > 0)) { toast("Enter the standard deduction amount"); return; }
+  const wr = num(f.wfhRateC); if (f.wfh && !(wr > 0 && wr < 1000)) { toast("Enter the work-from-home rate in cents, e.g. 70"); return; }
   const st = clone(SET()); st.rules = st.rules || {};
-  st.rules[f.fy] = { cpk: !!f.cpk, rate: r2((rate || 0) / 100 * 10000) / 10000, cap: cap || 0, std: !!f.std, stdAmt: stdAmt || 0, stdCats: f.stdCats, instant: instant ?? 300 };
+  st.rules[f.fy] = { cpk: !!f.cpk, rate: r2((rate || 0) / 100 * 10000) / 10000, cap: cap || 0, std: !!f.std, stdAmt: stdAmt || 0, stdCats: f.stdCats.filter(x => x !== "wfh"), instant: instant ?? 300,
+    wfh: !!f.wfh, wfhRate: r2((wr || 0) / 100 * 10000) / 10000, wfhOk: !!f.wfhOk, wfhInStd: f.stdCats.includes("wfh") };
   await saveSettings(st); closeSheet(); toast(`${f.fy} rules saved`);
 }
 
@@ -473,19 +669,25 @@ function openItem(key) {
   else if (kind === "category") { const c = (st.categories || []).find(x => x.id === id) || {}; Object.assign(f, { name: c.name || "", hidden: !!c.hidden }); }
   else if (kind === "purpose") Object.assign(f, { name: id === "" ? "" : (st.purposes || [])[+id] || "" });
   else if (kind === "person") { const p = people().find(x => x.id === id) || {}; Object.assign(f, { name: p.name || "" }); }
+  else if (kind === "shift") { const x = (st.shifts || []).find(y => y.id === id) || {}; Object.assign(f, { person: x.person || S.meta.me, name: x.name || "", start: x.start || "", end: x.end || "", brk: x.brk ?? 0, hidden: !!x.hidden }); }
+  else if (kind === "billkind") { const k = (st.billKinds || []).find(y => y.id === id) || {}; Object.assign(f, { name: k.name || "", hidden: !!k.hidden }); }
   else if (kind === "accountant") Object.assign(f, { name: st.accountant || "", isNew: false });
   else if (kind === "retain") Object.assign(f, { years: st.retainYears || 7, isNew: false });
   openSheet({ kind: "item", f });
 }
 function sheetItem() {
-  const f = S.sheet.f, T = { place: "place", car: "car", category: "category", purpose: "purpose", person: "person", accountant: "Accountant", retain: "Keep records for" };
+  const f = S.sheet.f, T = { place: "place", car: "car", category: "category", purpose: "purpose", person: "person", shift: "shift", billkind: "bill type", accountant: "Accountant", retain: "Keep records for" };
   const title = f.kind === "accountant" || f.kind === "retain" ? T[f.kind] : (f.isNew ? "Add " : "Edit ") + T[f.kind];
   let body = "";
   if (f.kind === "retain") body = `<div class="field"><label for="iYears">Years after the end of each tax year</label><input id="iYears" data-f="years" inputmode="numeric" value="${esc(f.years)}"><span class="hint">The ATO generally asks for 5 years from lodging. Records can't be permanently deleted before this.</span></div>`;
   else body = `<div class="field"><label for="iName">${f.kind === "accountant" ? "Name shown on the PDF" : "Name"}</label><input id="iName" data-f="name" value="${esc(f.name)}"></div>`;
   if (f.kind === "place") body += `<div class="field"><label for="iKm">Km — return trip from your usual workplace</label><input id="iKm" data-f="km" inputmode="decimal" value="${esc(f.km)}"></div>`;
+  if (f.kind === "shift") body = seg(people().map(p => ({ v: p.id, l: p.name })), f.person, "iPerson") + body + `<div class="grid3"><div class="field"><label for="iStart">Start</label><input id="iStart" type="time" data-f="start" value="${esc(f.start)}"></div>
+    <div class="field"><label for="iEnd">Finish</label><input id="iEnd" type="time" data-f="end" value="${esc(f.end)}"></div>
+    <div class="field"><label for="iBrk">Unpaid break (min)</label><input id="iBrk" data-f="brk" inputmode="numeric" value="${esc(f.brk)}"></div></div>
+    <span class="hint" id="iLine">${esc(wfhLine(f))}</span><span class="hint">Changing a shift only affects new entries; days already saved keep their own times.</span>`;
   if (f.kind === "car") body += `<label class="check"><input type="checkbox" data-f="isDefault" ${f.isDefault ? "checked" : ""}> Default car for new trips</label>`;
-  if (["place", "car", "category"].includes(f.kind) && !f.isNew) body += `<label class="check"><input type="checkbox" data-f="hidden" ${f.hidden ? "checked" : ""}> Hide it (past records keep it)</label>`;
+  if (["place", "car", "category", "shift", "billkind"].includes(f.kind) && !f.isNew) body += `<label class="check"><input type="checkbox" data-f="hidden" ${f.hidden ? "checked" : ""}> Hide it (past records keep it)</label>`;
   if (["place", "car", "category", "person"].includes(f.kind) && !f.isNew) body += `<div class="note">Past records keep the name they were saved with. Renaming only affects new records.</div>`;
   if (f.kind === "purpose" && !f.isNew) body += `<div class="row"><button type="button" class="btn danger" data-act="itemDelete">Remove from the list</button></div>`;
   return sheetFrame(title, body, `<button type="button" class="btn primary big" data-act="itemSave">Save</button>`);
@@ -498,6 +700,13 @@ async function itemSave() {
   else if (f.kind === "category") { st.categories = st.categories || []; if (f.isNew) st.categories.push({ id: uid("cat"), name }); else Object.assign(st.categories.find(x => x.id === f.id), { name, hidden: !!f.hidden || undefined }); }
   else if (f.kind === "purpose") { st.purposes = st.purposes || []; if (f.isNew) { if (!st.purposes.includes(name)) st.purposes.push(name); } else st.purposes[+f.id] = name; }
   else if (f.kind === "person") { st.people = st.people || []; if (f.isNew) st.people.push({ id: uid("p"), name }); else st.people.find(x => x.id === f.id).name = name; }
+  else if (f.kind === "shift") {
+    ["start", "end", "brk"].forEach(k => { const el = $(k === "start" ? "#iStart" : k === "end" ? "#iEnd" : "#iBrk"); if (el) f[k] = el.value; });
+    const h = shiftHours(f.start, f.end, f.brk); if (h == null) { toast("Enter the start and finish times"); return; } if (!(h > 0)) { toast("The break is as long as the shift"); return; }
+    const o = { person: f.person, name, start: f.start, end: f.end, brk: Math.max(0, Math.round(num(f.brk) || 0)) };
+    st.shifts = st.shifts || []; if (f.isNew) st.shifts.push({ id: uid("sh"), ...o }); else Object.assign(st.shifts.find(x => x.id === f.id), o, { hidden: !!f.hidden || undefined });
+  }
+  else if (f.kind === "billkind") { st.billKinds = st.billKinds || []; if (f.isNew) st.billKinds.push({ id: uid("bk"), name }); else Object.assign(st.billKinds.find(x => x.id === f.id), { name, hidden: !!f.hidden || undefined }); }
   else if (f.kind === "accountant") st.accountant = name;
   else if (f.kind === "retain") { const y = num(f.years); if (!(y >= 5 && y <= 30)) { toast("Choose 5 to 30 years"); return; } st.retainYears = Math.round(y); }
   await saveSettings(st); closeSheet(); toast("Saved");
@@ -505,22 +714,32 @@ async function itemSave() {
 async function itemDelete() { const f = S.sheet.f, st = clone(SET()); if (f.kind === "purpose") st.purposes.splice(+f.id, 1); await saveSettings(st); closeSheet(); toast("Removed"); }
 
 /* ================= end-of-year PDF ================= */
+const RP_DEF = { carLog: false, wfhTotal: true, wfhMonthly: false, wfhLog: false, expList: true, billsList: true, photos: false };
+const RP_LABEL = { carLog: "Car: every trip (off = car totals only)", wfhTotal: "Work from home: total hours and claim", wfhMonthly: "Work from home: monthly totals", wfhLog: "Work from home: every shift (date, start–finish, break, hours)", expList: "Expenses list", billsList: "Bills held list", photos: "Copies of receipts and bills" };
+const reportOpts = pid => ({ ...RP_DEF, ...((S.meta.reportOpts || {})[pid] || {}) });
+function openReport() { const person = (S.sumWho && S.sumWho !== "all") ? S.sumWho : S.meta.me; openSheet({ kind: "report", f: { fy: S.fy, person, ...reportOpts(person) } }); }
 function sheetReport() {
   const f = S.sheet.f;
   const body = `<div class="field"><label for="rpFy">Tax year</label><select id="rpFy" data-f="fy">${fyList().map(x => `<option ${x === f.fy ? "selected" : ""}>${x}</option>`).join("")}</select></div>
     <div class="field"><span class="flabel">For</span>${seg(people().map(p => ({ v: p.id, l: p.name })), f.person, "rpPerson")}</div>
-    <label class="check"><input type="checkbox" data-f="tripLog" ${f.tripLog ? "checked" : ""}> Full trip log</label>
-    <label class="check"><input type="checkbox" data-f="photos" ${f.photos ? "checked" : ""}> Receipt photos at the end</label>
+    <div class="field"><span class="flabel">Show in the PDF</span><div class="list" style="padding:0 14px">
+      <label class="check" style="border-bottom:1px solid var(--line)"><input type="checkbox" checked disabled> Summary of deductions (always included)</label>
+      ${Object.keys(RP_DEF).map(k => `<label class="check" style="border-bottom:1px solid var(--line)"><input type="checkbox" data-f="${k}" ${f[k] ? "checked" : ""}> ${esc(RP_LABEL[k])}</label>`).join("")}</div>
+      <span class="hint">These only change what's printed. Every trip and shift is kept in the app, so the full record can be printed at any time (for example if the ATO asks for it).</span></div>
     <div class="note">Tap <b>Make PDF</b>, then in the print screen choose <b>Save as PDF</b> (top of the screen) and save it. Email the PDF to ${esc(SET().accountant || "your accountant")}.</div>`;
   return sheetFrame("End-of-year PDF", body, `<button type="button" class="btn primary big" data-act="makePdf">${IC.doc}Make PDF</button>`);
 }
 async function makePdf() {
   const f = S.sheet.f, c = calc(f.fy, f.person), R = c.R, st = SET(), name = pName(f.person);
+  S.meta.reportOpts = { ...(S.meta.reportOpts || {}), [f.person]: Object.fromEntries(Object.keys(RP_DEF).map(k => [k, !!f[k]])) }; await saveMeta();
+  let sec = 1; const H = (t, extra) => `<h2${extra || ""}>${sec++}. ${t}</h2>`;
   const T = (head, rows, foot) => `<table class="rt"><thead><tr>${head.map(h => `<th class="${h[1] || ""}">${h[0]}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody>${foot ? `<tfoot>${foot}</tfoot>` : ""}</table>`;
-  const sumRows = [...c.cars.map(g => `<tr><td>Car expenses — cents per km (${esc(g.car)})</td><td class="n">${money(g.claim)}</td></tr>`), ...(!c.cars.length && R.cpk ? [`<tr><td>Car expenses — cents per km</td><td class="n">${money(0)}</td></tr>`] : []), ...c.cats.map(x => `<tr><td>${esc(x.name)}</td><td class="n">${money(x.claim)}</td></tr>`)];
+  const sumRows = [...c.cars.map(g => `<tr><td>Car expenses — cents per km (${esc(g.car)})</td><td class="n">${money(g.claim)}</td></tr>`), ...(!c.cars.length && R.cpk ? [`<tr><td>Car expenses — cents per km</td><td class="n">${money(0)}</td></tr>`] : []),
+    ...(R.wfh || c.wfh.days ? [`<tr><td>Working from home — fixed rate method (${hrsf(c.wfh.hours)} × ${cents(R.wfhRate)})</td><td class="n">${money(c.wfh.amt)}</td></tr>`] : []), ...c.cats.map(x => `<tr><td>${esc(x.name)}</td><td class="n">${money(x.claim)}</td></tr>`)];
   const trips = [...c.trips].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : (a.created || 0) - (b.created || 0));
   const exps = [...c.exps].sort((a, b) => a.date < b.date ? -1 : 1);
-  const files = []; for (const e of exps) for (const id of e.files || []) { const fl = await dbGet("files", id); if (fl) files.push({ e, fl, url: await fileURL(id) }); }
+  const bl = billsFor(f.fy, f.person), wl = [...c.wfh.list].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : (a.created || 0) - (b.created || 0));
+  const files = []; for (const e of [...exps, ...bl.flatMap(x => x.held)]) for (const id of e.files || []) { const fl = await dbGet("files", id); if (fl) files.push({ e, fl, url: await fileURL(id) }); }
   let h = `<style>#report{font:10pt/1.4 "IBM Plex Sans",Arial,sans-serif;color:#111}#report h1{font-size:20pt;margin:2pt 0;color:#13294B}#report h2{font-size:12pt;margin:16pt 0 6pt;color:#13294B}#report .k{font-size:8pt;letter-spacing:.08em;text-transform:uppercase;color:#555;font-weight:600}
     #report .hd{display:flex;justify-content:space-between;border-bottom:1.5pt solid #13294B;padding-bottom:8pt}#report .meta{text-align:right;font-size:9pt;color:#444}
     #report .rt{width:100%;border-collapse:collapse;font-size:9pt}#report .rt th,#report .rt td{border-bottom:.5pt solid #bbb;padding:3pt 5pt;text-align:left;vertical-align:top}#report .rt thead th{border-bottom:1pt solid #333;font-size:8pt;color:#333}#report .rt tfoot td{font-weight:700;border-top:1pt solid #333;border-bottom:0}#report .n{text-align:right;white-space:nowrap}
@@ -529,18 +748,28 @@ async function makePdf() {
     #report .ft{margin-top:14pt;border-top:.5pt solid #bbb;padding-top:5pt;font-size:8pt;color:#555}#report tr,#report .facts{break-inside:avoid}</style>
   <div class="hd"><div style="display:flex;gap:12pt;align-items:flex-start"><svg width="42" height="42" viewBox="0 0 96 96"><rect width="96" height="96" rx="22" fill="#13294B"/><path d="M24 50 L41 66 L72 31" stroke="#FFFFFF" stroke-width="15" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M24 50 L41 66 L72 31" stroke="#13294B" stroke-width="2.6" fill="none" stroke-dasharray="5 6" stroke-linecap="round"/><circle cx="72" cy="31" r="5.5" fill="#F2B544"/></svg><div><div class="k">Work-related deductions · ${f.fy}</div><h1>${esc(name)}</h1><div>Prepared for ${esc(st.accountant || "the tax agent")}</div></div></div>
     <div class="meta">Period ${fyRange(f.fy)}<br>Generated ${fmtDate(todayISO())}<br>Our Tax v${APP_VERSION}</div></div>
-  <h2>1. Summary</h2>${T([["Category"], ["Amount", "n"]], sumRows, `<tr><td>Total deductions</td><td class="n">${money(c.total)}</td></tr>`)}`;
+  ${H("Summary")}${T([["Category"], ["Amount", "n"]], sumRows, `<tr><td>Total deductions</td><td class="n">${money(c.total)}</td></tr>`)}`;
   if (c.std) h += `<p class="sm" style="margin-top:6pt">Standard deduction ${f.fy}: ${money(c.std.amt)}. Work-related items above that count toward it total ${money(c.std.work)}; ${money(c.std.onTop)} is claimed on top either way. ${c.std.itemise ? "Itemised work-related expenses exceed the standard deduction." : "The standard deduction is larger than the itemised work-related expenses."}</p>`;
   if (c.sample) h += `<p class="sm"><b>Note:</b> includes sample data loaded to test the app.</p>`;
   if (trips.length || R.cpk) {
-    h += `<h2>2. Car expenses — cents per kilometre method</h2>`;
+    h += H("Car expenses — cents per kilometre method");
     for (const g of c.cars) h += `<div class="facts"><div>Vehicle<b>${esc(g.car)}</b></div><div>Rate<b>${cents(R.rate)} / km</b></div><div>Trips<b>${g.count}</b></div><div>Business km<b>${kmf(g.km)}</b></div>${g.over ? `<div>Km claimed (cap)<b>${kmf(g.claimKm)}</b></div>` : ""}<div>Claim<b>${money(g.claim)}</b></div></div>`;
     h += `<p class="sm">Distances are return trips from the usual place of work to the place attended, using a set distance for each location. Each trip was recorded in Our Tax as it occurred. The car is owned by the taxpayer.</p>`;
-    if (f.tripLog && trips.length) h += T([["Date"], ["Destination"], ["Purpose"], ["Car"], ["Km", "n"], ["Amount", "n"]], trips.map(t => `<tr><td>${fmtAU(t.date)}</td><td>${esc(t.place)}</td><td>${esc(t.purpose || "")}${t.notes ? ` — ${esc(t.notes)}` : ""}</td><td>${esc(t.car || "")}</td><td class="n">${t.km}</td><td class="n">${money(tripClaim(t))}</td></tr>`), `<tr><td colspan="4">${trips.length} trips</td><td class="n">${c.km}</td><td class="n">${money(c.carClaim)}</td></tr>`);
+    if (f.carLog && trips.length) h += T([["Date"], ["Destination"], ["Purpose"], ["Car"], ["Km", "n"], ["Amount", "n"]], trips.map(t => `<tr><td>${fmtAU(t.date)}</td><td>${esc(t.place)}</td><td>${esc(t.purpose || "")}${t.notes ? ` — ${esc(t.notes)}` : ""}</td><td>${esc(t.car || "")}</td><td class="n">${t.km}</td><td class="n">${money(tripClaim(t))}</td></tr>`), `<tr><td colspan="4">${trips.length} trips</td><td class="n">${c.km}</td><td class="n">${money(c.carClaim)}</td></tr>`);
   }
-  h += `<h2>3. Other expenses</h2>` + (exps.length ? T([["Date"], ["Category"], ["Item"], ["Cost", "n"], ["Work %", "n"], ["Claim", "n"], ["Receipt"]], exps.map(e => `<tr><td>${fmtAU(e.date)}</td><td>${esc(e.cat)}</td><td>${esc(e.desc)}${e.basis ? `<br><span class="sm">${esc(e.basis)}</span>` : ""}${e.notes ? `<br><span class="sm">${esc(e.notes)}</span>` : ""}</td><td class="n">${money(e.amount)}</td><td class="n">${e.pct ?? 100}%</td><td class="n">${money(expClaim(e))}</td><td>${(e.files || []).length ? "Yes" : "—"}</td></tr>`), `<tr><td colspan="5">${exps.length} items</td><td class="n">${money(r2(exps.reduce((a, e) => a + expClaim(e), 0)))}</td><td></td></tr>`) : `<p class="sm">None recorded.</p>`);
-  if (f.photos && files.length) h += `<h2 style="break-before:page">4. Receipts</h2><div class="ph">${files.map(x => /^image\//.test(x.fl.type) ? `<figure><img src="${x.url}" alt=""><figcaption>${fmtAU(x.e.date)} · ${esc(x.e.desc)} · ${money(x.e.amount)}</figcaption></figure>` : `<figure><figcaption>${fmtAU(x.e.date)} · ${esc(x.e.desc)} · PDF receipt kept in Our Tax</figcaption></figure>`).join("")}</div>`;
-  h += `<div class="ft">Records for ${f.fy} are kept until ${fmtDate(keepUntil(f.fy))}. Rules applied: ${R.cpk ? `${cents(R.rate)}/km, ${R.cap.toLocaleString("en-AU")} km cap per car` : "cents per km not used"}${R.std ? `, ${money(R.stdAmt)} standard deduction` : ""}.</div>`;
+  if ((R.wfh || c.wfh.days) && (f.wfhTotal || f.wfhMonthly || f.wfhLog)) {
+    h += H("Working from home — fixed rate method");
+    if (f.wfhTotal) h += `<div class="facts"><div>Days<b>${c.wfh.days}</b></div><div>Hours worked<b>${hrsf(c.wfh.hours)}</b></div><div>Rate<b>${cents(R.wfhRate)} / hour</b></div><div>Claim<b>${money(c.wfh.amt)}</b></div>${bl.length ? `<div>Bills held<b>${bl.filter(x => x.held.length).length} of ${bl.length}</b></div>` : ""}</div>`;
+    h += `<p class="sm">Hours are the actual hours worked at home, recorded in Our Tax at the time, less unpaid breaks. The fixed rate covers electricity, gas, internet, phone and stationery; none of these are claimed separately.${c.wfh.exact !== c.wfh.amt ? ` Claim is ${hrsf(c.wfh.hours)} × ${cents(R.wfhRate)} = ${money(c.wfh.exact)}, cents disregarded.` : ""}${R.wfhOk ? "" : ` The ${f.fy} rate shown is provisional until confirmed by the ATO.`}</p>`;
+    if (f.wfhMonthly && c.wfh.months.length) h += T([["Month"], ["Days", "n"], ["Hours", "n"]], c.wfh.months.map(m => { const [y, mo] = m.k.split("-"); return `<tr><td>${MONTHS[+mo - 1]} ${y}</td><td class="n">${m.days}</td><td class="n">${m.hours}</td></tr>`; }), `<tr><td>Total</td><td class="n">${c.wfh.days}</td><td class="n">${c.wfh.hours}</td></tr>`);
+    if (f.wfhLog && wl.length) h += T([["Date"], ["Shift"], ["Start – finish"], ["Unpaid break"], ["Hours", "n"]], wl.map(w => `<tr><td>${fmtAU(w.date)}</td><td>${esc(w.shift || "—")}</td><td>${t12(w.start)} – ${t12(w.end)}</td><td>${(w.brk || 0) ? w.brk + " min" : "none"}</td><td class="n">${w.hours}</td></tr>`), `<tr><td colspan="4">${wl.length} days</td><td class="n">${c.wfh.hours}</td></tr>`);
+    if (!c.wfh.days) h += `<p class="sm">None recorded.</p>`;
+  }
+  if (f.expList) h += H("Other expenses") + (exps.length ? T([["Date"], ["Category"], ["Item"], ["Cost", "n"], ["Work %", "n"], ["Claim", "n"], ["Receipt"]], exps.map(e => `<tr><td>${fmtAU(e.date)}</td><td>${esc(e.cat)}</td><td>${esc(e.desc)}${e.basis ? `<br><span class="sm">${esc(e.basis)}</span>` : ""}${e.notes ? `<br><span class="sm">${esc(e.notes)}</span>` : ""}</td><td class="n">${money(e.amount)}</td><td class="n">${e.pct ?? 100}%</td><td class="n">${money(expClaim(e))}</td><td>${(e.files || []).length ? "Yes" : "—"}</td></tr>`), `<tr><td colspan="5">${exps.length} items</td><td class="n">${money(r2(exps.reduce((a, e) => a + expClaim(e), 0)))}</td><td></td></tr>`) : `<p class="sm">None recorded.</p>`);
+  if (f.billsList && bl.length) h += H("Running-expense evidence held (working from home)") + T([["Bill"], ["Description"], ["Date"], ["Covers"]], bl.flatMap(x => x.held.length ? x.held.map(b => `<tr><td>${esc(x.k.name)}</td><td>${esc(b.desc || "—")}</td><td>${fmtAU(b.date)}</td><td>${(b.covers || []).length > 1 ? "Shared household" : esc(pName((b.covers || [])[0]))}</td></tr>`) : [`<tr><td>${esc(x.k.name)}</td><td>Not held</td><td></td><td></td></tr>`]));
+  const cap = x => x.e.type === "bill" ? `${fmtAU(x.e.date)} · ${esc(x.e.kindName || "Bill")}${x.e.desc ? " · " + esc(x.e.desc) : ""}` : `${fmtAU(x.e.date)} · ${esc(x.e.desc)} · ${money(x.e.amount)}`;
+  if (f.photos && files.length) h += H("Copies of receipts and bills", ' style="break-before:page"') + `<div class="ph">${files.map(x => /^image\//.test(x.fl.type) ? `<figure><img src="${x.url}" alt=""><figcaption>${cap(x)}</figcaption></figure>` : `<figure><figcaption>${cap(x)} · PDF copy kept in Our Tax</figcaption></figure>`).join("")}</div>`;
+  h += `<div class="ft">Records for ${f.fy} are kept until ${fmtDate(keepUntil(f.fy))}. Rules applied: ${R.cpk ? `${cents(R.rate)}/km, ${R.cap.toLocaleString("en-AU")} km cap per car` : "cents per km not used"}${R.wfh ? `, working from home ${cents(R.wfhRate)}/hour${R.wfhOk ? "" : " (provisional)"}` : ""}${R.std ? `, ${money(R.stdAmt)} standard deduction` : ""}.</div>`;
   const rep = $("#report"); rep.innerHTML = h;
   await Promise.all($$("img", rep).map(i => i.decode ? i.decode().catch(() => {}) : null));
   const t = document.title; document.title = `${name} work deductions ${f.fy}`; window.print(); setTimeout(() => { document.title = t; }, 1500);
@@ -845,6 +1074,19 @@ document.addEventListener("click", async e => {
     case "recWho": S.rec.who = v; render(); break;
     case "addTrip": openSheet({ kind: "trip", f: newTrip(), keepScroll: false }); break;
     case "addExpense": openSheet({ kind: "expense", f: newExpense(), keepScroll: false }); break;
+    case "addWfh": openSheet({ kind: "wfh", f: newWfh(), keepScroll: false }); break;
+    case "wPerson": { const n = newWfh(v); Object.assign(f, { person: v, shiftId: n.shiftId, start: n.start, end: n.end, brk: n.brk }); renderSheet(); break; }
+    case "wShift": { f.shiftId = v; const sh = (SET().shifts || []).find(x => x.id === v); if (sh) Object.assign(f, { start: sh.start, end: sh.end, brk: sh.brk }); renderSheet(); break; }
+    case "wDay": f.days = f.days.includes(v) ? f.days.filter(x => x !== v) : [...f.days, v]; renderSheet(); break;
+    case "wClear": f.days = []; renderSheet(); break;
+    case "wMonth": { const [y, m] = f.month.split("-").map(Number), d = new Date(y, m - 1 + (+v), 1), nm = d.getFullYear() + "-" + p2(d.getMonth() + 1); if (nm <= todayISO().slice(0, 7)) { f.month = nm; renderSheet(); } break; }
+    case "saveWfh": el.disabled = true; try { await saveWfh(); } finally { el.disabled = false; } break;
+    case "bills": openBills(S.fy, (S.sumWho && S.sumWho !== "all" && S.tab === "summary") ? S.sumWho : null); break;
+    case "bPerson": f.person = v; renderSheet(); break;
+    case "addBill": { const back = S.sheet; openSheet({ kind: "bill", back, f: newBill(v, back) }); break; }
+    case "bKind": f.kind = v; renderSheet(); break;
+    case "saveBill": el.disabled = true; try { await saveBill(); } finally { el.disabled = false; } break;
+    case "iPerson": f.person = v; renderSheet(); break;
     case "openEntry": openEntry(el.dataset.id); break;
     case "closeSheet": cancelSheet(); break;
     case "fPerson": f.person = v; renderSheet(); break;
@@ -867,8 +1109,8 @@ document.addEventListener("click", async e => {
     case "editItem": openItem(el.dataset.id); break;
     case "itemSave": itemSave(); break;
     case "itemDelete": itemDelete(); break;
-    case "report": openSheet({ kind: "report", f: { fy: S.fy, person: (S.sumWho && S.sumWho !== "all") ? S.sumWho : S.meta.me, tripLog: true, photos: false } }); break;
-    case "rpPerson": f.person = v; renderSheet(); break;
+    case "report": openReport(); break;
+    case "rpPerson": Object.assign(f, { person: v }, reportOpts(v)); renderSheet(); break;
     case "makePdf": el.disabled = true; try { await makePdf(); } catch (err) { toast("Couldn't make the PDF: " + (err.message || err)); } el.disabled = false; break;
     case "goBackup": if (!S.meta.me) break; openSheet({ kind: "backup" }); break;
     case "backupFile": backupFile(); break;
@@ -899,12 +1141,15 @@ document.addEventListener("change", async e => {
   if (t.id === "eFile") { await addFiles([...t.files]); t.value = ""; return; }
   if (t.id === "restoreIn") { if (t.files[0]) await restoreFile(t.files[0]); t.value = ""; return; }
   if (!S.sheet) return;
+  if (t.dataset.cov) { const s = new Set(S.sheet.f.covers); t.checked ? s.add(t.dataset.cov) : s.delete(t.dataset.cov); S.sheet.f.covers = people().map(p => p.id).filter(id => s.has(id)); return; }
   if (t.dataset.cat) { const s = new Set(S.sheet.f.stdCats); t.checked ? s.add(t.dataset.cat) : s.delete(t.dataset.cat); S.sheet.f.stdCats = [...s]; return; }
   if (t.dataset.f) { S.sheet.f[t.dataset.f] = t.type === "checkbox" ? t.checked : t.value; if (t.type === "checkbox" || t.tagName === "SELECT" || t.type === "date") { if (["date", "from", "to", "weekdays", "pct", "fy"].includes(t.dataset.f) || t.type === "checkbox") renderSheet(); else liveUpdate(t.dataset.f); } }
 });
 function liveUpdate(k) {
   const sh = S.sheet, foot = $("#foot"); if (!sh) return;
   if (sh.kind === "trip") { if (foot) foot.innerHTML = tripFoot(); const ri = $("#rangeInfo"); if (ri) ri.textContent = rangeInfo(sh.f); }
+  if (sh.kind === "wfh") { if (foot) foot.innerHTML = wfhFoot(); const wl = $("#wfhLine"); if (wl) wl.textContent = wfhLine(sh.f); }
+  if (sh.kind === "item" && sh.f.kind === "shift") { const il = $("#iLine"); if (il) il.textContent = wfhLine(sh.f); }
   if (sh.kind === "expense") { if (foot) foot.innerHTML = expFoot(); const ih = $("#instHint"); if (ih) ih.textContent = instantHint(sh.f); const ch = $("#catHint"); if (ch) ch.textContent = catHint(sh.f); }
 }
 document.addEventListener("keydown", e => { if (e.key === "Escape" && S.sheet) cancelSheet(); });
@@ -969,6 +1214,6 @@ async function reload() { S.entries = await dbAll("entries"); const m = await db
   render();
   if (await dbxReturn()) { render(); if (S.meta.me) openSheet({ kind: "backup" }); }
   dbxSync();
-  const q = new URLSearchParams(location.search).get("add"); if (q && S.meta.me) openSheet({ kind: q === "expense" ? "expense" : "trip", f: q === "expense" ? newExpense() : newTrip() });
+  const q = new URLSearchParams(location.search).get("add"); if (q && S.meta.me) openSheet(q === "wfh" ? { kind: "wfh", f: newWfh() } : { kind: q === "expense" ? "expense" : "trip", f: q === "expense" ? newExpense() : newTrip() });
   if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("sw.js").catch(() => {});
 })();

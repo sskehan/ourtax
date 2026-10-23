@@ -1,9 +1,9 @@
-# Our Tax — work trips and tax deductions (version 1.03)
+# Our Tax — work trips, work from home and tax deductions (version 1.04)
 
-Work kilometres (cents per km), work expenses with receipt photos, a summary for each tax year and an end-of-year PDF for the accountant — for Shaun and Lyndsey on their own phones.
+Work kilometres (cents per km), work from home hours (fixed rate method), work expenses with receipt photos, a summary for each tax year and an end-of-year PDF for the accountant — for Shaun and Lyndsey on their own phones.
 Runs on your phone, works offline, and keeps a shared live copy in your own Dropbox (synced on Wi‑Fi).
 
-App address: **https://sskehan.github.io/tax/**
+App address: **https://sskehan.github.io/ourtax/** (GitHub repo **sskehan/ourtax**)
 
 ## Files in this repository
 index.html · app.js · sw.js · manifest.webmanifest · icon-192.png · icon-512.png · README.md
@@ -11,7 +11,7 @@ index.html · app.js · sw.js · manifest.webmanifest · icon-192.png · icon-51
 Only program files go here. The repository is public, so **never upload a backup file to GitHub.**
 
 ## 1. Put it on GitHub (one time)
-1. On GitHub: **New repository** → name **tax** → **Public** → **Create repository**.
+1. On GitHub: **New repository** → name **ourtax** → **Public** → **Create repository**.
 2. **Add file → Upload files** → drag in all the files above → **Commit changes**.
 3. **Settings → Pages** → Source **Deploy from a branch** → Branch **main** / **(root)** → **Save**.
    After a minute or two the app address above works.
@@ -20,32 +20,39 @@ Only program files go here. The repository is public, so **never upload a backup
 1. Go to **dropbox.com/developers/apps** → **Create app**.
 2. Choose **Scoped access** → **App folder** → name it **OurTax** (if that name is taken, try **OurTax Skehan**) → **Create app**.
 3. **Permissions** tab: tick `files.metadata.read`, `files.content.read`, `files.content.write` → **Submit**.
-4. **Settings** tab → **OAuth 2 → Redirect URIs**: add `https://sskehan.github.io/tax/` exactly → **Add**.
+4. **Settings** tab → **OAuth 2 → Redirect URIs**: add `https://sskehan.github.io/ourtax/` exactly → **Add**.
    Leave **Allow public clients (Implicit Grant & PKCE)** set to **Allow**.
 5. Copy the **App key** (not the App secret — that is never used).
 
 The App key is built into the app, so there's nothing to paste.
 
 ## 3. Install on each phone
-1. Open the app address in **Chrome**.
-2. Tap **⋮ → Install app** (or **Add to Home screen → Install**).
+1. Open the app address in **Samsung Internet** (or Chrome).
+2. Samsung Internet: **☰ → Add page to → Apps screen**. Chrome: **⋮ → Add to Home screen → Install**.
+   If **Google Play Protect** says "Unsafe app blocked … built for an older version of Android", tap **Install anyway**.
+   The warning is about the wrapper Android builds for web apps, not about Our Tax; the app asks for no phone permissions.
+   (If Chrome says "This app is already installed" / "Could not open app", Play Protect blocked an earlier attempt — install from Samsung Internet instead.)
 3. Open **Our Tax** and choose whose phone it is (Shaun or Lyndsey).
 4. **Settings → Backup & sync → Connect Dropbox** → sign in with the **same Dropbox account on both phones** → **Allow**.
    If the sign-in comes back in a Chrome tab, close the tab and open Our Tax from the home screen.
-5. Long-press the icon for the **Add trip** and **Add expense** shortcuts.
+5. Long-press the icon for the **Add trip**, **Add work from home** and **Add expense** shortcuts.
 
 ## 4. Everyday use
 - **Trip:** tap **Trip**, tap the court (Windsor 46 km, Mt Druitt 30 km, Blacktown 52 km), pick the purpose, **Save**. Today is chosen already.
 - **A week at the same court:** **Date range** → From / To → **Weekdays only** → it saves one trip per day.
+- **Work from home:** tap **WFH**, pick the shift, tap the days you worked at home on the calendar, **Save**. Hours are worked out from start to finish less the unpaid break:
+  Shaun · Day 8:00am–4:30pm less 30 min = 8 h; Lyndsey · Day 7am–7pm and Night 7pm–7am = 12 h (a night shift counts on the date it starts).
+  Change the times before saving if a day was different. Future days are locked. Shifts can be edited or added in **Settings → Work-from-home shifts**.
+- **Bills held:** the ATO needs one bill for each cost the fixed rate covers (electricity/gas, internet, phone, stationery). Home → WFH card → **Bills held** → **Add** → photo → tick who it covers (both for a shared household bill).
 - **Expense:** tap **Expense**, pick the category, type what it was and the cost, set the work % if it's not 100%, add a receipt photo, **Save**.
 - **Records:** tap any record to change it. Every change is logged with who made it and when.
 - **Removing:** a removed record stops counting but is kept (and can be restored) for 7 years after the end of its tax year. **Records › Show removed** shows them.
 - **Summary:** one page per tax year, per person or the household, with itemised vs standard deduction when that applies.
-- **End-of-year PDF:** Summary → **Run end-of-year PDF** → **Make PDF** → in the print screen choose **Save as PDF** → email it to Positive Tax Solutions.
+- **End-of-year PDF:** Summary → **Run end-of-year PDF** → tick what to show (car trip list, WFH totals / monthly totals / every shift, expenses, bills, copies) → **Make PDF** → in the print screen choose **Save as PDF** → email it to Positive Tax Solutions.
 
 ## 5. Changing rules (future-proof)
 Nothing about the tax rules is fixed in the program. **Settings → Tax year rules** holds, for each tax year:
-the cents-per-km rate, the km cap per car, whether the cents-per-km method applies, whether the standard deduction applies and its amount,
+the cents-per-km rate, the km cap per car, whether the cents-per-km method applies, the work-from-home rate per hour (and whether the ATO has confirmed it), whether the standard deduction applies and its amount,
 which categories count toward it, and the immediate-deduction limit for equipment.
 Each July tap **Start 2027-28** — it copies the last year, so usually only the rate needs changing. Past years never change.
 Places, cars, purposes, categories and people can all be added, renamed or hidden in Settings; past records keep the names they were saved with.
@@ -69,6 +76,7 @@ Places, cars, purposes, categories and people can all be added, renamed or hidde
 Your data is not affected. When a file changes, `APP_VERSION` at the top of `app.js` and `VERSION` in `sw.js` change together.
 
 ## Version history
+- **1.04** — Work from home (fixed rate method) for both of you: saved shifts, tap days on a calendar, overnight shifts, hours less unpaid breaks; bills-held checklist with shared household bills; per-year WFH rate with "provisional until confirmed"; WFH counted toward the $1,000 standard deduction; PDF section choices (tick boxes); new address sskehan.github.io/ourtax and the Play Protect install step.
 - **1.03** — New logo (road tick) and colours: navy header with the logo, teal for buttons and selections, plum for Lyndsey (warnings stay amber); the PDF carries the logo; "sample" and "removed" tags no longer stretch across the row.
 - **1.02** — New app identity so Chrome can install it cleanly (fixes "This app is already installed" / "Could not open app"); the Our Tax title no longer wraps beside a long sync status.
 - **1.01** — Dropbox App key built in (no pasting needed).

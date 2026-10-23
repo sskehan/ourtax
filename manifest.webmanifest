@@ -2,7 +2,7 @@
   "id": "./?app=our-tax",
   "name": "Our Tax",
   "short_name": "Our Tax",
-  "description": "Work trips and tax deductions for Shaun and Lyndsey. Works offline; shared through Dropbox.",
+  "description": "Work trips, work from home and tax deductions for Shaun and Lyndsey. Works offline; shared through Dropbox.",
   "start_url": "./?app=our-tax",
   "scope": "./",
   "display": "standalone",
@@ -27,6 +27,17 @@
       "name": "Add trip",
       "short_name": "Trip",
       "url": "./?add=trip",
+      "icons": [
+        {
+          "src": "icon-192.png",
+          "sizes": "192x192"
+        }
+      ]
+    },
+    {
+      "name": "Add work from home",
+      "short_name": "WFH",
+      "url": "./?add=wfh",
       "icons": [
         {
           "src": "icon-192.png",
