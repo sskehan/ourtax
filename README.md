@@ -1,4 +1,4 @@
-# Our Tax — work trips, work from home and tax deductions (version 1.04)
+# Our Tax — work trips, work from home and tax deductions (version 1.05)
 
 Work kilometres (cents per km), work from home hours (fixed rate method), work expenses with receipt photos, a summary for each tax year and an end-of-year PDF for the accountant — for Shaun and Lyndsey on their own phones.
 Runs on your phone, works offline, and keeps a shared live copy in your own Dropbox (synced on Wi‑Fi).
@@ -49,6 +49,15 @@ The App key is built into the app, so there's nothing to paste.
 - **Removing:** a removed record stops counting but is kept (and can be restored) for 7 years after the end of its tax year. **Records › Show removed** shows them.
 - **Summary:** one page per tax year, per person or the household, with itemised vs standard deduction when that applies.
 - **End-of-year PDF:** Summary → **Run end-of-year PDF** → tick what to show (car trip list, WFH totals / monthly totals / every shift, expenses, bills, copies) → **Make PDF** → in the print screen choose **Save as PDF** → email it to Positive Tax Solutions.
+
+## 4a. From Our Gear (version 1.05)
+In Our Gear, an item ticked **Work deduction** has **Send to Our Tax**. Tap it, then **Open Our Tax**:
+- A new expense opens with the item, price, date and store filled in, the receipt copied across, and the category set to Other work-related.
+- It goes to the person the item **Belongs to** in Our Gear (Shaun or Lyndsey); anything else goes to whoever's phone it is, and you can change it.
+- Set the **work use %**, then **Save expense**. Our Tax keeps its own copy of the receipt, so your tax records stay complete even if the item is archived in Our Gear.
+- Our Gear then shows the item as **In Our Tax** (person, tax year, work %, amount), and the button becomes **Open in Our Tax**, so it can't be entered twice. Removing the expense here clears that in Our Gear.
+- The purchase is recorded as one expense; over $300 the app reminds you it's usually claimed over the item's life, for the accountant to work out.
+- Both apps must be installed from the **same browser** (for example both from Samsung Internet) for the receipt to come across. If not, the details still arrive and you add the photo.
 
 ## 5. Changing rules (future-proof)
 Nothing about the tax rules is fixed in the program. **Settings → Tax year rules** holds, for each tax year:

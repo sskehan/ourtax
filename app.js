@@ -1,6 +1,6 @@
 "use strict";
 /* Our Tax — work trips and tax deductions for two people. Data lives on each phone (IndexedDB), with a shared live copy in Dropbox. */
-const APP_ID = "our-tax", BACKUP_VERSION = 1, APP_VERSION = "1.04";
+const APP_ID = "our-tax", BACKUP_VERSION = 1, APP_VERSION = "1.05";
 
 /* ================= storage ================= */
 const STORES = ["entries", "files", "meta"];
@@ -317,7 +317,7 @@ function sheetFrame(title, body, foot) {
 }
 function renderSheet() {
   const el = $("#sheet"), body = $(".sh-body", el), sc = body ? body.scrollTop : 0, sh = S.sheet; if (!sh) return;
-  const html = sh.kind === "trip" ? sheetTrip() : sh.kind === "expense" ? sheetExpense() : sh.kind === "wfh" ? sheetWfh() : sh.kind === "bills" ? sheetBills() : sh.kind === "bill" ? sheetBill() : sh.kind === "rules" ? sheetRules() : sh.kind === "item" ? sheetItem() : sh.kind === "report" ? sheetReport() : sh.kind === "backup" ? sheetBackup() : "";
+  const html = sh.kind === "trip" ? sheetTrip() : sh.kind === "expense" ? sheetExpense() : sh.kind === "wfh" ? sheetWfh() : sh.kind === "bills" ? sheetBills() : sh.kind === "bill" ? sheetBill() : sh.kind === "rules" ? sheetRules() : sh.kind === "item" ? sheetItem() : sh.kind === "report" ? sheetReport() : sh.kind === "backup" ? sheetBackup() : sh.kind === "gearDone" ? sheetGearDone() : "";
   el.innerHTML = html; el.hidden = false; document.body.style.overflow = "hidden";
   const nb = $(".sh-body", el); if (nb && sh.keepScroll !== false) nb.scrollTop = sc;
   if (sh.kind === "expense" || sh.kind === "bill") paintThumbs();
@@ -454,7 +454,7 @@ async function saveExpense() {
   if (!f.desc.trim()) { toast("Say what it was"); return; }
   if (!(amt > 0)) { toast("Enter the cost"); return; }
   if (pct == null || pct < 0 || pct > 100) { toast("Work use must be 0 to 100%"); return; }
-  const by = pName(S.meta.me), at = new Date().toISOString(), cat = catName(f.catId) || "Other";
+  const by = pName(S.meta.me), at = new Date().toISOString(), cat = catName(f.catId) || "Other"; let newId = null;
   const base = { person: f.person, date: f.date, catId: f.catId, cat, desc: f.desc.trim(), amount: r2(amt), pct, basis: f.basis.trim(), notes: f.notes.trim(), files: [...f.files] };
   if (edit) {
     const o = S.entries.find(x => x.id === edit), n = { ...clone(o), ...base };
@@ -465,11 +465,16 @@ async function saveExpense() {
     n.log = [...(o.log || []), { at, by, act: "Changed " + ch }]; await dbPut("entries", n);
     for (const id of fr ? (o.files || []).filter(x => !(n.files || []).includes(x)) : []) await dbDel("files", id);
   } else {
-    await dbPut("entries", { id: uid("e"), type: "expense", ...base, created: Date.now(), log: [{ at, by, act: "Added" }] });
+    const ne = { id: uid("e"), type: "expense", ...base, ...(f.gearItem ? { gearItem: f.gearItem } : {}), created: Date.now(), log: [{ at, by, act: f.gearItem ? "Added from Our Gear" : "Added" }] };
+    await dbPut("entries", ne); newId = ne.id;
     S.meta.lastCat = f.catId; await saveMeta();
   }
   for (const id of f.added.filter(x => !f.files.includes(x))) await dbDel("files", id);
-  f.added = []; await reload(); closeSheet(); toast(edit ? "Expense updated" : `Expense saved · ${money(r2(amt * pct / 100))}`);
+  f.added = []; await reload();
+  const saved = S.entries.find(x => x.id === (edit || newId));
+  if (saved && saved.gearItem) await gearNote(saved);
+  if (!edit && saved && saved.gearItem) { S.sheet = null; clearTimeout(toast._t); $("#toast").hidden = true; openSheet({ kind: "gearDone", f: { itemId: saved.gearItem, desc: saved.desc, claim: expClaim(saved), person: pName(saved.person), fy: fyOf(saved.date) } }); return; }
+  closeSheet(); toast(edit ? "Expense updated" : `Expense saved · ${money(r2(amt * pct / 100))}`);
 }
 async function cancelSheet() {
   if (S.sheet && (S.sheet.kind === "expense" || S.sheet.kind === "bill")) for (const id of S.sheet.f.added || []) await dbDel("files", id);
@@ -487,11 +492,12 @@ async function setRemoved(flag) {
   if (flag && !confirm(`Remove this record? It stops counting in totals but is kept, and can be restored, until ${fmtDate(keepUntil(entryFy(o)))}.`)) return;
   const n = { ...clone(o), removed: flag || undefined, log: [...(o.log || []), { at: new Date().toISOString(), by: pName(S.meta.me), act: flag ? "Removed" : "Restored" }] };
   if (!flag) delete n.removed;
-  await dbPut("entries", n); await reload(); closeSheet(); toast(flag ? "Record removed (it can be restored from Records › Show removed)" : "Record restored");
+  await dbPut("entries", n); await gearNote(n, !!flag); await reload(); closeSheet(); toast(flag ? "Record removed (it can be restored from Records › Show removed)" : "Record restored");
 }
 async function purgeEntry() {
   const o = S.entries.find(x => x.id === S.sheet.id); if (!o) return;
   if (!confirm("Delete this record permanently? This can't be undone.")) return;
+  await gearNote(o, true);
   for (const id of o.files || []) await dbDel("files", id);
   await dbDel("entries", o.id); await reload(); closeSheet(); toast("Record deleted");
 }
@@ -1202,6 +1208,48 @@ async function loadSample() {
 }
 async function removeSample() { for (const e of S.entries.filter(x => x.sample)) await dbDel("entries", e.id); await reload(); render(); toast("Sample records removed"); }
 
+/* ================= Our Gear hand-off =================
+   Our Gear and Our Tax both live on sskehan.github.io, so on the same phone and browser they share a small hand-off box:
+   Our Gear leaves an item's details and receipt copies, Our Tax opens them as a new expense, and leaves a note back when
+   it's saved or removed so Our Gear can show "In Our Tax". */
+const OURGEAR_URL = "https://sskehan.github.io/ourgear/";
+const HANDOFF = {
+  open() { return new Promise((res, rej) => { const r = indexedDB.open("ourapps-handoff", 1); r.onupgradeneeded = () => r.result.createObjectStore("box"); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); },
+  async run(mode, fn) { const db = await this.open(); try { return await new Promise((res, rej) => { const t = db.transaction("box", mode); let out; const q = fn(t.objectStore("box")); if (q) q.onsuccess = () => { out = q.result; }; t.oncomplete = () => res(out); t.onerror = () => rej(t.error); }); } finally { db.close(); } },
+  put(k, v) { return this.run("readwrite", os => os.put(v, k)); },
+  async take(k) { const v = await this.run("readonly", os => os.get(k)); if (v !== undefined) await this.run("readwrite", os => os.delete(k)); return v; }
+};
+async function gearNote(e, removed) {
+  if (!e || !e.gearItem) return;
+  try { await HANDOFF.put("gear:" + e.gearItem + ":" + Date.now(), { itemId: e.gearItem, expenseId: e.id, removed: !!removed, person: pName(e.person), fy: fyOf(e.date), pct: e.pct, claim: expClaim(e), at: Date.now() }); } catch {}
+}
+async function handleGear() {
+  const p = new URLSearchParams(location.search), itemId = p.get("gearitem"); if (!itemId) return;
+  history.replaceState(null, "", DBX_REDIRECT);
+  if (!S.meta.me) { toast("Finish setting up Our Tax on this phone first, then send the item again from Our Gear."); return; }
+  let box = null; try { if (p.get("gear")) box = await HANDOFF.take("tax:" + p.get("gear")); } catch {}
+  const ex = S.entries.find(e => e.gearItem === itemId && !e.removed);
+  if (ex) { openEntry(ex.id); toast("This item is already in Our Tax, so here it is"); await gearNote(ex); return; }
+  const d = box || { desc: p.get("desc") || "", amount: p.get("amount") || "", date: p.get("date") || "", store: p.get("store") || "", person: p.get("person") || "", receipts: [] };
+  const f = newExpense();
+  const who = people().find(x => x.name.toLowerCase() === String(d.person || "").toLowerCase());
+  if (who) f.person = who.id;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(d.date || "")) f.date = d.date;
+  if (visCats().find(c => c.id === "cat-work")) f.catId = "cat-work";
+  f.desc = d.desc || ""; f.amount = d.amount || ""; f.notes = d.store ? "Bought from " + d.store : ""; f.gearItem = itemId;
+  for (const r of (d.receipts || [])) {
+    const isImg = /^image\//.test(r.type || ""), blob = isImg ? await resizeImage(r.blob) : r.blob, id = uid("f");
+    await dbPut("files", { id, type: isImg ? "image/jpeg" : r.type || "application/octet-stream", name: r.name || id, blob }); f.files.push(id); f.added.push(id);
+  }
+  openSheet({ kind: "expense", f });
+  toast(box ? (f.files.length ? `From Our Gear with ${f.files.length === 1 ? "the receipt" : f.files.length + " receipts"}. Check the work use %, then Save.` : "From Our Gear. Check the work use %, then Save.")
+    : p.get("gear") ? "The receipt didn't come across (Our Tax and Our Gear are in different browsers). Add the photo here." : "From Our Gear. Check the work use %, then Save.");
+}
+function sheetGearDone() {
+  const f = S.sheet.f;
+  return sheetFrame("Saved in Our Tax", `<div class="empty" style="text-align:left"><b>${esc(f.desc)}</b><br>${money(f.claim)} for ${esc(f.person)}, ${esc(f.fy)} tax year.<br>Our Gear will show it as In Our Tax.</div>`,
+    `<a class="btn primary big" href="${OURGEAR_URL}#/item/${encodeURIComponent(f.itemId)}">Back to Our Gear</a><button type="button" class="btn" data-act="closeSheet" style="margin-top:8px;width:100%">Stay in Our Tax</button>`);
+}
 /* ================= boot ================= */
 async function saveMeta() { S.meta.stamp = Date.now(); await tx("meta", "readwrite", os => os.put({ id: "main", ...S.meta })); }
 async function reload() { S.entries = await dbAll("entries"); const m = await dbGet("meta", "main"); S.meta = m ? (({ id, ...r }) => r)(m) : {}; }
@@ -1215,5 +1263,6 @@ async function reload() { S.entries = await dbAll("entries"); const m = await db
   if (await dbxReturn()) { render(); if (S.meta.me) openSheet({ kind: "backup" }); }
   dbxSync();
   const q = new URLSearchParams(location.search).get("add"); if (q && S.meta.me) openSheet(q === "wfh" ? { kind: "wfh", f: newWfh() } : { kind: q === "expense" ? "expense" : "trip", f: q === "expense" ? newExpense() : newTrip() });
+  await handleGear();
   if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("sw.js").catch(() => {});
 })();
